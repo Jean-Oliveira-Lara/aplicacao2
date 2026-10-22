@@ -475,7 +475,8 @@ textarea.fin-input {
 
 .fin-kpi__value {
   font-family: var(--font-mono);
-  font-size: 18px;
+  /* encolhe em telas estreitas para o valor caber numa linha */
+  font-size: clamp(14px, 4.4vw, 18px);
   font-weight: 700;
   font-variant-numeric: tabular-nums;
   overflow-wrap: anywhere;
@@ -896,6 +897,9 @@ textarea.fin-input {
   }
   .fin-balance__value {
     font-size: 27px;
+  }
+  .fin-day__grid {
+    grid-template-columns: 1fr;
   }
 }
 
