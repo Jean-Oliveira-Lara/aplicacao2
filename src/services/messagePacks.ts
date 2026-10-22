@@ -29,16 +29,31 @@ interface MessagePack {
    * (se você editou, a sua versão é mantida).
    */
   replace?: { ids: string[]; originalTexts: Record<string, string>; with: PackMessage }[];
+  /** Remove mensagens que continuam com o texto original. */
+  remove?: { id: string; originalText: string }[];
 }
 
 const THANKS_TEXT = 'Deus abençoe e faça prosperar ainda mais!!';
 const RECEIPT_TEXT = 'Só me manda o comprovante aqui por questões de controle financeiro, ótima semana 🙌🏽';
+
+const TRAJECTORY_TEXT =
+  'julio_ostapenko acompanhe essa trajetória de perto rumo ao brasileiro mais uma vez 🦅';
+
+/** Mensagem inicial que o discador criava no primeiro uso. */
+const DEFAULT_WELCOME_TEXT = 'Olá! Tudo bem? Estou entrando em contato para apresentar nosso produto.';
 
 /** As duas primeiras mensagens do pacote 1 eram uma só mensagem. */
 const MERGED_THANKS_RECEIPT: PackMessage = {
   id: 'pack-1-agradecimento-comprovante',
   name: 'Agradecimento + comprovante',
   text: `${THANKS_TEXT}\n\n${RECEIPT_TEXT}`,
+};
+
+/** Agradecimento + comprovante + trajetória, numa mensagem só. */
+const ASKING_RECEIPT: PackMessage = {
+  id: 'pack-3-pedindo-comprovante',
+  name: 'Pedindo comprovante',
+  text: `${THANKS_TEXT}\n\n${RECEIPT_TEXT}\n\n${TRAJECTORY_TEXT}`,
 };
 
 const PACKS: MessagePack[] = [
@@ -49,7 +64,7 @@ const PACKS: MessagePack[] = [
       {
         id: 'pack-1-instagram-trajetoria',
         name: 'Instagram (trajetória)',
-        text: 'julio_ostapenko acompanhe essa trajetória de perto rumo ao brasileiro mais uma vez 🦅',
+        text: TRAJECTORY_TEXT,
       },
       {
         id: 'pack-1-pix',
@@ -93,6 +108,23 @@ const PACKS: MessagePack[] = [
         with: MERGED_THANKS_RECEIPT,
       },
     ],
+  },
+  {
+    // Junta "Agradecimento + comprovante" com "Instagram (trajetória)" em
+    // "Pedindo comprovante" e remove a "Mensagem inicial".
+    id: 'pack-3',
+    messages: [],
+    replace: [
+      {
+        ids: ['pack-1-agradecimento-comprovante', 'pack-1-instagram-trajetoria'],
+        originalTexts: {
+          'pack-1-agradecimento-comprovante': MERGED_THANKS_RECEIPT.text,
+          'pack-1-instagram-trajetoria': TRAJECTORY_TEXT,
+        },
+        with: ASKING_RECEIPT,
+      },
+    ],
+    remove: [{ id: 'default-1', originalText: DEFAULT_WELCOME_TEXT }],
   },
 ];
 
@@ -141,6 +173,9 @@ export function applyMessagePacks(seedIfEmpty: QuickMessage[]): void {
         list = list.filter((m) => !untouched(m));
         list.splice(Math.min(position, list.length), 0, replacement);
         existingIds.add(rule.with.id);
+      }
+      for (const rule of pack.remove ?? []) {
+        list = list.filter((m) => !(m.id === rule.id && m.text === rule.originalText));
       }
       applied.add(pack.id);
     }

@@ -2,15 +2,9 @@ import type { QuickMessage } from '../types';
 import { storage, STORAGE_KEYS } from './storage';
 import { applyMessagePacks } from './messagePacks';
 
-const DEFAULT_MESSAGES: QuickMessage[] = [
-  {
-    id: 'default-1',
-    name: 'Mensagem inicial',
-    text: 'Olá! Tudo bem? Estou entrando em contato para apresentar nosso produto.',
-    createdAt: new Date().toISOString(),
-    updatedAt: new Date().toISOString(),
-  },
-];
+// A antiga "Mensagem inicial" foi removida a pedido; a lista começa com
+// as mensagens dos pacotes (messagePacks.ts).
+const DEFAULT_MESSAGES: QuickMessage[] = [];
 
 function makeId(): string {
   return typeof crypto !== 'undefined' && 'randomUUID' in crypto
