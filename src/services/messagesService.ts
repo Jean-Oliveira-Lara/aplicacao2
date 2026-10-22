@@ -1,5 +1,6 @@
 import type { QuickMessage } from '../types';
 import { storage, STORAGE_KEYS } from './storage';
+import { applyMessagePacks } from './messagePacks';
 
 const DEFAULT_MESSAGES: QuickMessage[] = [
   {
@@ -18,6 +19,8 @@ function makeId(): string {
 }
 
 export async function getMessages(): Promise<QuickMessage[]> {
+  // Soma as mensagens dos pacotes novos (uma vez por aparelho).
+  applyMessagePacks(DEFAULT_MESSAGES);
   const stored = await storage.get<QuickMessage[]>(STORAGE_KEYS.messages);
   if (stored && stored.length > 0) return stored;
   // Seed with a starter message on first run so the app isn't empty.
