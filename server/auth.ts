@@ -5,7 +5,7 @@
 import { createHash, randomBytes } from 'node:crypto';
 import type { Db } from './db';
 import { HttpError, parseCookies } from './http';
-import { verifyPassword } from './password';
+import { hashPassword, verifyPassword } from './password';
 
 export const SESSION_COOKIE = 'dsc_session';
 const SESSION_DAYS = 90;
@@ -69,7 +69,7 @@ export async function login(
   password: unknown
 ): Promise<string> {
   if (typeof username !== 'string' || typeof password !== 'string' || !username || !password) {
-    throw new HttpError(400, 'Informe usuário e senha.');
+    throw new HttpError(400, 'Informe e-mail e senha.');
   }
 
   const [{ failures }] = await db.query<{ failures: string | number }>(
@@ -86,10 +86,11 @@ export async function login(
   );
   const user = users[0];
   const passwordOk = await verifyPassword(password, user?.password_hash ?? DUMMY_HASH);
-  const ok = Boolean(user) && passwordOk && user.username === username.trim();
+  // O e-mail/usuário não diferencia maiúsculas de minúsculas.
+  const ok = Boolean(user) && passwordOk && user.username.toLowerCase() === username.trim().toLowerCase();
 
   await db.query('INSERT INTO login_attempts (success) VALUES ($1)', [ok]);
-  if (!ok) throw new HttpError(401, 'Usuário ou senha inválidos.');
+  if (!ok) throw new HttpError(401, 'E-mail ou senha inválidos.');
 
   const token = randomBytes(32).toString('base64url');
   await db.query(
@@ -108,4 +109,64 @@ export async function logout(req: Request, db: Db): Promise<string> {
   const token = parseCookies(req.headers.get('cookie'))[SESSION_COOKIE];
   if (token) await db.query('DELETE FROM sessions WHERE token_hash = $1', [hashToken(token)]);
   return sessionCookie(req, '', 0);
+}
+
+// =====================================================================
+// Conta: ver e trocar e-mail e senha (sempre pedindo a senha atual)
+// =====================================================================
+
+const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+const MIN_PASSWORD = 8;
+
+export async function getAccount(db: Db) {
+  const rows = await db.query<{ username: string }>('SELECT username FROM app_user WHERE id = 1');
+  if (!rows[0]) throw new HttpError(404, 'Usuário não encontrado.');
+  return { email: rows[0].username };
+}
+
+/** Confere a senha atual. Erros contam como tentativa de login (anti força bruta). */
+async function checkCurrentPassword(db: Db, password: unknown): Promise<void> {
+  if (typeof password !== 'string' || !password) throw new HttpError(400, 'Digite a senha atual.');
+  const [{ failures }] = await db.query<{ failures: string | number }>(
+    `SELECT count(*) AS failures FROM login_attempts
+      WHERE success = false AND attempted_at > now() - make_interval(mins => $1)`,
+    [FAILURE_WINDOW_MINUTES]
+  );
+  if (Number(failures) >= MAX_FAILURES) {
+    throw new HttpError(429, 'Muitas tentativas erradas. Aguarde 15 minutos e tente de novo.');
+  }
+  const rows = await db.query<{ password_hash: string }>('SELECT password_hash FROM app_user WHERE id = 1');
+  const ok = rows[0] ? await verifyPassword(password, rows[0].password_hash) : false;
+  if (!ok) {
+    await db.query('INSERT INTO login_attempts (success) VALUES (false)');
+    // 403 (e não 401): senha atual errada não pode parecer "sessão expirada" para o app.
+    throw new HttpError(403, 'Senha atual incorreta.');
+  }
+}
+
+export async function changeEmail(db: Db, currentPassword: unknown, newEmail: unknown) {
+  const email = typeof newEmail === 'string' ? newEmail.trim().toLowerCase() : '';
+  if (!EMAIL_RE.test(email) || email.length > 200) throw new HttpError(400, 'Digite um e-mail válido.');
+  await checkCurrentPassword(db, currentPassword);
+  await db.query('UPDATE app_user SET username = $1, updated_at = now() WHERE id = 1', [email]);
+  return { email };
+}
+
+/** Troca a senha e encerra as outras sessões (mantém só a deste aparelho). */
+export async function changePassword(req: Request, db: Db, currentPassword: unknown, newPassword: unknown) {
+  if (typeof newPassword !== 'string' || newPassword.length < MIN_PASSWORD) {
+    throw new HttpError(400, `A nova senha precisa ter pelo menos ${MIN_PASSWORD} caracteres.`);
+  }
+  if (newPassword.length > 200) throw new HttpError(400, 'Senha muito longa.');
+  await checkCurrentPassword(db, currentPassword);
+  if (await verifyPassword(newPassword, (await db.query<{ password_hash: string }>('SELECT password_hash FROM app_user WHERE id = 1'))[0].password_hash)) {
+    throw new HttpError(400, 'A nova senha precisa ser diferente da atual.');
+  }
+  const hash = await hashPassword(newPassword);
+  const token = parseCookies(req.headers.get('cookie'))[SESSION_COOKIE] ?? '';
+  await db.transaction([
+    { text: 'UPDATE app_user SET password_hash = $1, updated_at = now() WHERE id = 1', params: [hash] },
+    { text: 'DELETE FROM sessions WHERE token_hash <> $1', params: [hashToken(token)] },
+  ]);
+  return { ok: true };
 }

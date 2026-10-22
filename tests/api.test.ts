@@ -493,3 +493,63 @@ describe('resumo por dia e por mês (fuso America/Sao_Paulo)', () => {
     assert.equal((await call('GET', '/summary?month=2025-13')).status, 400);
   });
 });
+
+// ---------------------------------------------------------------------
+describe('conta: trocar e-mail e senha', () => {
+  beforeEach(async () => {
+    await createUser();
+    await loginOk();
+  });
+
+  test('mostra o e-mail atual (só com login)', async () => {
+    assert.equal((await call('GET', '/account')).data.email, 'jean');
+    await call('POST', '/logout');
+    assert.equal((await call('GET', '/account')).status, 401);
+  });
+
+  test('troca o e-mail com a senha atual; login passa a usar o novo e não diferencia maiúsculas', async () => {
+    const bad = await call('POST', '/account/email', { currentPassword: 'errada', newEmail: 'novo@exemplo.com' });
+    assert.equal(bad.status, 403); // 403, não 401: não pode parecer sessão expirada
+    assert.equal((await call('GET', '/me')).data.authenticated, true);
+    const invalid = await call('POST', '/account/email', { currentPassword: 'senha-de-teste-123', newEmail: 'nao-e-email' });
+    assert.equal(invalid.status, 400);
+    const ok = await call('POST', '/account/email', { currentPassword: 'senha-de-teste-123', newEmail: ' Novo@Exemplo.com ' });
+    assert.equal(ok.status, 200);
+    assert.equal(ok.data.email, 'novo@exemplo.com');
+    await call('POST', '/logout');
+    assert.equal((await call('POST', '/login', { username: 'jean', password: 'senha-de-teste-123' })).status, 401);
+    assert.equal((await call('POST', '/login', { username: 'NOVO@exemplo.com', password: 'senha-de-teste-123' })).status, 200);
+  });
+
+  test('troca a senha, mantém esta sessão e derruba as outras', async () => {
+    const thisDevice = cookie;
+    // outra sessão (outro aparelho)
+    cookie = '';
+    await loginOk();
+    const otherDevice = cookie;
+    cookie = thisDevice;
+
+    assert.equal((await call('POST', '/account/password', { currentPassword: 'senha-de-teste-123', newPassword: 'curta' })).status, 400);
+    assert.equal((await call('POST', '/account/password', { currentPassword: 'errada', newPassword: 'nova-senha-forte-1' })).status, 403);
+    assert.equal((await call('POST', '/account/password', { currentPassword: 'senha-de-teste-123', newPassword: 'senha-de-teste-123' })).status, 400);
+    const ok = await call('POST', '/account/password', { currentPassword: 'senha-de-teste-123', newPassword: 'nova-senha-forte-1' });
+    assert.equal(ok.status, 200);
+
+    assert.equal((await call('GET', '/summary')).status, 200); // este aparelho continua
+    cookie = otherDevice;
+    assert.equal((await call('GET', '/summary')).status, 401); // o outro foi desconectado
+    cookie = '';
+    assert.equal((await call('POST', '/login', { username: 'jean', password: 'senha-de-teste-123' })).status, 401);
+    assert.equal((await call('POST', '/login', { username: 'jean', password: 'nova-senha-forte-1' })).status, 200);
+    const [row] = await db.query<{ password_hash: string }>('SELECT password_hash FROM app_user');
+    assert.ok(!row.password_hash.includes('nova-senha-forte-1'));
+  });
+
+  test('senha atual errada repetidas vezes bloqueia (anti força bruta)', async () => {
+    for (let i = 0; i < 8; i++) {
+      await call('POST', '/account/password', { currentPassword: 'x', newPassword: 'nova-senha-forte-1' });
+    }
+    const r = await call('POST', '/account/password', { currentPassword: 'senha-de-teste-123', newPassword: 'nova-senha-forte-1' });
+    assert.equal(r.status, 429);
+  });
+});

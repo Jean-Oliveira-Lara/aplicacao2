@@ -32,7 +32,7 @@ export default function LoginForm({ userConfigured, onLoggedIn }: LoginFormProps
   return (
     <form className="fin-card fin-login" onSubmit={handleSubmit}>
       <h2 className="fin-card__title">Entrar no painel</h2>
-      <p className="fin-muted">O painel financeiro é protegido. Só o usuário cadastrado tem acesso.</p>
+      <p className="fin-muted">O painel financeiro é protegido. Só a conta cadastrada tem acesso.</p>
 
       {!userConfigured && (
         <p className="fin-alert">
@@ -41,12 +41,15 @@ export default function LoginForm({ userConfigured, onLoggedIn }: LoginFormProps
         </p>
       )}
 
-      <label className="fin-label" htmlFor="fin-user">Usuário</label>
+      <label className="fin-label" htmlFor="fin-user">E-mail</label>
       <input
         id="fin-user"
         className="fin-input"
+        inputMode="email"
         autoComplete="username"
         autoCapitalize="none"
+        autoCorrect="off"
+        spellCheck={false}
         value={username}
         onChange={(e) => setUsername(e.target.value)}
         required

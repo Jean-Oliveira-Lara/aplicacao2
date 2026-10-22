@@ -898,3 +898,29 @@ textarea.fin-input {
     font-size: 27px;
   }
 }
+
+/* ---------- conta ---------- */
+.fin-account-email {
+  color: var(--color-text);
+  font-weight: 600;
+  overflow-wrap: anywhere;
+}
+
+.fin-account-form {
+  border-top: 1px solid var(--color-border);
+  margin-top: 6px;
+  padding-top: 2px;
+}
+
+.fin-account-form .fin-subtitle {
+  margin-top: 12px;
+}
+
+.fin-account-form .fin-success,
+.fin-account-form .fin-error {
+  margin-top: 10px;
+}
+
+.fin-account-logout {
+  margin-top: 16px;
+}

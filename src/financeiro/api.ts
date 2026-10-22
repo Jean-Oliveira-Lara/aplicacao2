@@ -151,6 +151,12 @@ export const api = {
     request<{ expense: Expense }>('PATCH', `/expenses/${id}`, patch),
   deleteExpense: (id: string) => request<{ ok: true }>('DELETE', `/expenses/${id}`),
 
+  account: () => request<{ email: string }>('GET', '/account'),
+  changeEmail: (currentPassword: string, newEmail: string) =>
+    request<{ email: string }>('POST', '/account/email', { currentPassword, newEmail }),
+  changePassword: (currentPassword: string, newPassword: string) =>
+    request<{ ok: true }>('POST', '/account/password', { currentPassword, newPassword }),
+
   settings: () => request<Settings>('GET', '/settings'),
   updateSettings: (defaultAmountCents: number | null) =>
     request<Settings>('PATCH', '/settings', { defaultAmountCents }),

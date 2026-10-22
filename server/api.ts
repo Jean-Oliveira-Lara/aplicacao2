@@ -3,7 +3,16 @@
  * (netlify/functions/api.mts) entrega todas as requisições para cá.
  */
 import type { Db } from './db';
-import { hasValidSession, isUserConfigured, login, logout, requireSession } from './auth';
+import {
+  changeEmail,
+  changePassword,
+  getAccount,
+  hasValidSession,
+  isUserConfigured,
+  login,
+  logout,
+  requireSession,
+} from './auth';
 import {
   cancelCharge,
   createExpense,
@@ -87,6 +96,16 @@ export async function handleApi(req: Request, db: Db): Promise<Response> {
         }
       }
       return json({ results });
+    }
+
+    if (path === '/account' && method === 'GET') return json(await getAccount(db));
+    if (path === '/account/email' && method === 'POST') {
+      const body = await readJson(req);
+      return json(await changeEmail(db, body.currentPassword, body.newEmail));
+    }
+    if (path === '/account/password' && method === 'POST') {
+      const body = await readJson(req);
+      return json(await changePassword(req, db, body.currentPassword, body.newPassword));
     }
 
     if (path === '/summary' && method === 'GET') return json(await getSummary(db, url.searchParams));

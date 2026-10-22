@@ -14,25 +14,38 @@ import { STORAGE_KEYS } from './storage';
 
 const APPLIED_PACKS_KEY = 'discador:message-packs';
 
+interface PackMessage {
+  id: string;
+  name: string;
+  text: string;
+}
+
 interface MessagePack {
   id: string;
-  messages: { id: string; name: string; text: string }[];
+  messages: PackMessage[];
+  /**
+   * Correções: troca mensagens de um pacote anterior por outra, na mesma
+   * posição da lista. Só troca as que continuam com o texto original
+   * (se você editou, a sua versão é mantida).
+   */
+  replace?: { ids: string[]; originalTexts: Record<string, string>; with: PackMessage }[];
 }
+
+const THANKS_TEXT = 'Deus abençoe e faça prosperar ainda mais!!';
+const RECEIPT_TEXT = 'Só me manda o comprovante aqui por questões de controle financeiro, ótima semana 🙌🏽';
+
+/** As duas primeiras mensagens do pacote 1 eram uma só mensagem. */
+const MERGED_THANKS_RECEIPT: PackMessage = {
+  id: 'pack-1-agradecimento-comprovante',
+  name: 'Agradecimento + comprovante',
+  text: `${THANKS_TEXT}\n\n${RECEIPT_TEXT}`,
+};
 
 const PACKS: MessagePack[] = [
   {
     id: 'pack-1',
     messages: [
-      {
-        id: 'pack-1-agradecimento',
-        name: 'Agradecimento',
-        text: 'Deus abençoe e faça prosperar ainda mais!!',
-      },
-      {
-        id: 'pack-1-comprovante',
-        name: 'Pedir comprovante',
-        text: 'Só me manda o comprovante aqui por questões de controle financeiro, ótima semana 🙌🏽',
-      },
+      MERGED_THANKS_RECEIPT,
       {
         id: 'pack-1-instagram-trajetoria',
         name: 'Instagram (trajetória)',
@@ -62,6 +75,22 @@ const PACKS: MessagePack[] = [
         id: 'pack-1-chave-pix',
         name: 'Chave Pix',
         text: 'Minha chave pix: 41995157474',
+      },
+    ],
+  },
+  {
+    // Correção para aparelhos que receberam o pacote 1 com as duas
+    // mensagens separadas: une as duas numa só, no mesmo lugar.
+    id: 'pack-2',
+    messages: [],
+    replace: [
+      {
+        ids: ['pack-1-agradecimento', 'pack-1-comprovante'],
+        originalTexts: {
+          'pack-1-agradecimento': THANKS_TEXT,
+          'pack-1-comprovante': RECEIPT_TEXT,
+        },
+        with: MERGED_THANKS_RECEIPT,
       },
     ],
   },
@@ -96,17 +125,27 @@ export function applyMessagePacks(seedIfEmpty: QuickMessage[]): void {
     const existingIds = new Set(current.map((m) => m.id));
     const now = new Date().toISOString();
 
-    const additions: QuickMessage[] = [];
+    let list = [...current];
     for (const pack of pending) {
       for (const message of pack.messages) {
         if (existingIds.has(message.id)) continue;
-        additions.push({ ...message, createdAt: now, updatedAt: now });
+        list.push({ ...message, createdAt: now, updatedAt: now });
         existingIds.add(message.id);
+      }
+      for (const rule of pack.replace ?? []) {
+        const untouched = (m: QuickMessage) =>
+          rule.ids.includes(m.id) && m.text === rule.originalTexts[m.id];
+        const position = list.findIndex(untouched);
+        if (position === -1 || existingIds.has(rule.with.id)) continue;
+        const replacement: QuickMessage = { ...rule.with, createdAt: now, updatedAt: now };
+        list = list.filter((m) => !untouched(m));
+        list.splice(Math.min(position, list.length), 0, replacement);
+        existingIds.add(rule.with.id);
       }
       applied.add(pack.id);
     }
 
-    window.localStorage.setItem(STORAGE_KEYS.messages, JSON.stringify([...current, ...additions]));
+    window.localStorage.setItem(STORAGE_KEYS.messages, JSON.stringify(list));
     window.localStorage.setItem(APPLIED_PACKS_KEY, JSON.stringify([...applied]));
   } catch (error) {
     console.error('Falha ao adicionar o pacote de mensagens', error);

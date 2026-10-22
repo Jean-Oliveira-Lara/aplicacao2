@@ -3,6 +3,7 @@ import { api } from './api';
 import type { Settings } from './api';
 import { centsToInput, formatMoney, parseMoneyInput } from './format';
 import type { SyncState } from './syncOutbox';
+import ContaSection from './ContaSection';
 
 interface AjustesTabProps {
   sync: SyncState;
@@ -112,13 +113,9 @@ export default function AjustesTab({ sync, onSyncNow, onLogout }: AjustesTabProp
         </p>
       </section>
 
-      <section className="fin-card">
-        <h2 className="fin-card__title">Conta</h2>
-        <p className="fin-muted">Fuso horário dos relatórios: {settings?.timezone ?? '…'}</p>
-        <button type="button" className="fin-btn fin-btn--ghost-danger fin-btn--block" onClick={onLogout}>
-          Sair do painel
-        </button>
-      </section>
+      <ContaSection onLogout={onLogout} />
+
+      <p className="fin-footnote">Fuso horário dos relatórios: {settings?.timezone ?? '…'}</p>
     </div>
   );
 }
