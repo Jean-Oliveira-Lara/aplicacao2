@@ -1,0 +1,82 @@
+@import url('https://fonts.googleapis.com/css2?family=Sora:wght@600;700;800&family=Inter:wght@400;500;600&family=JetBrains+Mono:wght@500;600;700&display=swap');
+
+:root {
+  color-scheme: dark;
+
+  /* Color — dark asphalt base so the panel stays legible in direct sunlight,
+     with the three signal colors of a traffic light doing double duty as
+     the app's functional palette (a real fit for a street vendor's tool). */
+  --color-bg: #14171a;
+  --color-surface: #1e2227;
+  --color-surface-alt: #262b31;
+  --color-border: #323942;
+  --color-text: #f5f7f8;
+  --color-text-muted: #8a939b;
+
+  --color-signal-green: #2fd675;
+  --color-signal-green-dark: #22a860;
+  --color-signal-amber: #ffb020;
+  --color-signal-red: #ff5a52;
+
+  --color-focus-ring: #5fd0ff;
+
+  /* Type */
+  --font-display: 'Sora', system-ui, sans-serif;
+  --font-body: 'Inter', system-ui, sans-serif;
+  --font-mono: 'JetBrains Mono', ui-monospace, monospace;
+
+  /* Layout */
+  --radius-lg: 20px;
+  --radius-md: 14px;
+  --radius-sm: 10px;
+  --tab-bar-height: 68px;
+  --safe-bottom: env(safe-area-inset-bottom, 0px);
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body,
+#root {
+  height: 100%;
+}
+
+body {
+  margin: 0;
+  background: var(--color-bg);
+  color: var(--color-text);
+  font-family: var(--font-body);
+  -webkit-font-smoothing: antialiased;
+  overscroll-behavior-y: none;
+}
+
+button,
+input,
+textarea {
+  font-family: inherit;
+}
+
+button {
+  cursor: pointer;
+  touch-action: manipulation;
+}
+
+button:focus-visible,
+input:focus-visible,
+textarea:focus-visible,
+[tabindex]:focus-visible {
+  outline: 2px solid var(--color-focus-ring);
+  outline-offset: 2px;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.001ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.001ms !important;
+  }
+}
