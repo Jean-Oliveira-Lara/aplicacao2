@@ -1,5 +1,6 @@
 import type { HistoryEntry } from '../types';
 import { storage, STORAGE_KEYS } from './storage';
+import { enqueueSend } from '../financeiro/syncOutbox';
 
 function makeId(): string {
   return typeof crypto !== 'undefined' && 'randomUUID' in crypto
@@ -27,6 +28,8 @@ export async function addHistoryEntry(
   };
   const updated = [newEntry, ...(history ?? [])];
   await storage.set(STORAGE_KEYS.history, updated);
+  // Painel financeiro: registra o envio no banco (fila com nova tentativa).
+  enqueueSend(newEntry);
   return newEntry;
 }
 

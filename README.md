@@ -92,3 +92,91 @@ Os arquivos de `dist/` podem ser publicados em qualquer hospedagem de site está
 ## Próximos passos sugeridos (fora do MVP)
 
 Login de usuário, sincronização via Supabase, tags e busca de clientes, favoritos, exportação de contatos, estatísticas de envio e empacotamento como PWA instalável — a arquitetura atual (serviços isolados, storage abstraído) foi pensada para que cada um desses itens seja incremental, sem reescrever telas existentes.
+
+---
+
+# Painel Financeiro (histórico, cobranças e despesas)
+
+Adicionado **sem alterar o discador**. O discador continua salvando mensagens e Recentes no celular, como antes. Cada envio agora também é registrado no banco **Neon** (Postgres), onde vira uma cobrança no painel.
+
+## O que mudou nos arquivos que já existiam
+
+Só quatro arquivos do app foram tocados, e nenhum deles é da tela do discador:
+
+| Arquivo | Mudança |
+|---|---|
+| `src/services/historyService.ts` | +1 linha: depois de salvar o envio nos Recentes, coloca o envio na fila para o banco |
+| `src/App.tsx` | rota `/financeiro` (carregada só quando aberta) |
+| `src/components/BottomNav.tsx` | terceira aba "Financeiro" |
+| `public/_redirects` | regra `/api/*` antes da regra do app |
+
+O CSS do discador continua byte a byte igual (`index-DvcJSkFv.css`).
+
+## Estrutura nova
+
+```
+db/migrations/001_financeiro.sql   # tabelas do banco
+server/                            # regras do servidor (login, envios, cobranças, despesas, resumos)
+netlify/functions/api.mts          # Netlify Function que atende /api/*
+src/financeiro/                    # telas do painel + fila de sincronização dos envios
+scripts/migrar.ts                  # aplica migrações
+scripts/criar-usuario.ts           # cria o usuário único
+tests/                             # testes automatizados (Postgres em memória)
+netlify.toml
+```
+
+## Tabelas
+
+- `charges`: cobranças (valor em centavos, status `pendente` / `pago` / `cancelado`, data da cobrança, data do pagamento)
+- `message_sends`: cada envio (id gerado no celular, então nunca duplica), ligado a uma cobrança
+- `charge_events`: histórico de toda alteração em cobrança (pago, pagamento desfeito, valor alterado…)
+- `expenses`: despesas (exclusão lógica: some dos totais, mas fica no banco)
+- `settings`: valor padrão por envio e fuso horário (`America/Sao_Paulo`)
+- `app_user`, `sessions`, `login_attempts`: login do usuário único
+
+## Regras financeiras
+
+- **Vendido** = pendente + pago (pela data da cobrança).
+- **Recebido** = só pagamentos confirmados (pela data da confirmação).
+- **Pendente** nunca entra no saldo.
+- **Saldo líquido** = recebido − despesas.
+- Sem valor padrão configurado, a cobrança nasce **sem valor** e não entra nos totais até você definir o valor.
+- Mesmo número no mesmo dia, com cobrança ainda pendente: o novo envio é vinculado a ela (não cobra duas vezes). Em dias diferentes, vira cobrança nova.
+- "Marcar como pago" só muda a cobrança uma vez, mesmo com cliques repetidos.
+- Pagamento marcado por engano: **Desfazer pagamento** no detalhe da cobrança. Cobrança lançada por engano: **Cancelar cobrança**. Tudo fica no histórico.
+- O link `wa.me` só abre a conversa no WhatsApp; o app não sabe se a mensagem foi entregue ou lida. O status registrado é sempre "conversa aberta no WhatsApp".
+
+## Configuração (uma vez)
+
+### 1. Banco (Neon)
+
+O projeto **discador-whatsapp** já foi criado no Neon e a migração já foi aplicada. Para aplicar migrações futuras:
+
+```bash
+# crie um arquivo .env (ele NÃO vai para o GitHub) com:
+# DATABASE_URL=postgresql://...   (copie em console.neon.tech → Connect)
+npm install
+npm run migrar
+```
+
+### 2. Usuário único
+
+```bash
+npm run criar-usuario
+```
+
+O script pede o usuário e a senha (a senha não aparece na tela) e grava só o hash no banco. Sem `.env`, ele imprime um comando SQL para colar no **SQL Editor** do Neon. Rodar de novo troca a senha e desconecta as sessões abertas. Não existe tela de cadastro.
+
+### 3. Netlify
+
+1. Em app.netlify.com: **Add new project → Import an existing project → GitHub → aplicacao2**. O `netlify.toml` já define o build (`npm run build`, pasta `dist`).
+2. Em **Project configuration → Environment variables**, crie `DATABASE_URL` com a connection string do Neon, com escopo **Functions** (marque como secreta).
+3. Faça o deploy. O Netlify Drop (arrastar a pasta) **não** roda as funções do painel.
+
+## Testes
+
+```bash
+npm test
+```
+
+Roda 32 testes da API contra um Postgres em memória (PGlite), com a mesma migração do Neon: login, envio duplicado, mesmo número em dias diferentes, pagamento com cliques repetidos, desfazer pagamento, despesas e saldo, agrupamento por dia e mês no fuso de São Paulo.

@@ -1,8 +1,11 @@
-import { useEffect } from 'react';
+import { Suspense, lazy, useEffect } from 'react';
 import { Route, Routes } from 'react-router-dom';
 import AppShell from './components/AppShell';
 import Home from './pages/Home';
 import Recentes from './pages/Recentes';
+
+// Painel financeiro: carregado só quando a aba é aberta.
+const Financeiro = lazy(() => import('./financeiro/Financeiro'));
 
 export default function App() {
   useEffect(() => {
@@ -29,6 +32,14 @@ export default function App() {
       <Routes>
         <Route path="/" element={<Home />} />
         <Route path="/recentes" element={<Recentes />} />
+        <Route
+          path="/financeiro"
+          element={
+            <Suspense fallback={null}>
+              <Financeiro />
+            </Suspense>
+          }
+        />
       </Routes>
     </AppShell>
   );

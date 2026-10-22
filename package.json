@@ -7,7 +7,10 @@
     "dev": "vite",
     "build": "tsc -b && vite build",
     "lint": "oxlint",
-    "preview": "vite preview"
+    "preview": "vite preview",
+    "test": "tsx --test tests/*.test.ts",
+    "migrar": "tsx scripts/migrar.ts",
+    "criar-usuario": "tsx scripts/criar-usuario.ts"
   },
   "dependencies": {
     "@neondatabase/serverless": "^1.2.0",

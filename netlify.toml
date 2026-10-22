@@ -1,0 +1,12 @@
+# Configuração do Netlify para o Discador WhatsApp + Painel Financeiro.
+# A senha do banco (DATABASE_URL) NÃO fica aqui: ela é cadastrada no
+# painel do Netlify, em Environment variables, com escopo "Functions".
+
+[build]
+  command = "npm run build"
+  publish = "dist"
+  environment = { NODE_VERSION = "22" }
+
+[functions]
+  directory = "netlify/functions"
+  node_bundler = "esbuild"

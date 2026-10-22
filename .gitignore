@@ -22,3 +22,7 @@ dist-ssr
 *.njsproj
 *.sln
 *.sw?
+
+# Variáveis locais (DATABASE_URL) — nunca commitar
+.env
+.netlify

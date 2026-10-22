@@ -30,6 +30,16 @@ export default function BottomNav() {
         </svg>
         <span>Recentes</span>
       </NavLink>
+      <NavLink
+        to="/financeiro"
+        className={({ isActive }) => `bottom-nav__item${isActive ? ' bottom-nav__item--active' : ''}`}
+      >
+        <svg viewBox="0 0 24 24" fill="none" aria-hidden="true" className="bottom-nav__icon">
+          <rect x="3.5" y="6" width="17" height="12.5" rx="2.5" stroke="currentColor" strokeWidth="2" />
+          <path d="M3.5 10h17M7.5 14.5h3" stroke="currentColor" strokeWidth="2" strokeLinecap="round" />
+        </svg>
+        <span>Financeiro</span>
+      </NavLink>
     </nav>
   );
 }
