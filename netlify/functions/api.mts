@@ -28,6 +28,9 @@ async function health(): Promise<Response> {
   const result: Record<string, string> = { api: 'ok' };
   try {
     const { getDb } = await import('../../server/db.ts');
+    const netlifyEnv = (globalThis as { Netlify?: { env?: { has?: (k: string) => boolean } } }).Netlify?.env;
+    result.envNetlify = netlifyEnv?.has?.('DATABASE_URL') ? 'sim' : 'não';
+    result.envProcess = process.env.DATABASE_URL ? 'sim' : 'não';
     let db;
     try {
       db = getDb();
