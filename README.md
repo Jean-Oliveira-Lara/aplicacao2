@@ -173,6 +173,8 @@ O script pede o usuário e a senha (a senha não aparece na tela) e grava só o 
 2. Em **Project configuration → Environment variables**, crie `DATABASE_URL` com a connection string do Neon, com escopo **Functions** (marque como secreta).
 3. Faça o deploy. O Netlify Drop (arrastar a pasta) **não** roda as funções do painel.
 
+> **Repositório público:** no plano gratuito do Netlify, repositórios privados só aceitam build de commits de um único contribuidor. Por isso o aplicacao2 é público. Nenhuma senha fica no código: a `DATABASE_URL` existe só nas variáveis de ambiente do Netlify.
+
 ## Testes
 
 ```bash
