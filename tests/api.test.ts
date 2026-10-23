@@ -1,6 +1,6 @@
 /**
- * Testes da API financeira contra um Postgres real (PGlite, em memória),
- * usando a mesma migração do Neon. Rode com: npm test
+ * Testes da API contra um Postgres real (PGlite, em memória), usando as
+ * mesmas migrações do Neon. Rode com: npm test
  */
 import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
@@ -32,11 +32,14 @@ async function call(method: string, path: string, body?: unknown, extraHeaders: 
   return { status: res.status, data: (await res.json()) as any };
 }
 
-async function createUser(username = 'jean', password = 'senha-de-teste-123') {
-  await db.query('INSERT INTO app_user (id, username, password_hash) VALUES (1, $1, $2)', [
-    username,
-    await hashPassword(password),
-  ]);
+/** Cria uma conta direto no banco (como a conta que já existia, administradora). */
+async function createUser(username = 'jean', password = 'senha-de-teste-123', role = 'admin') {
+  const [row] = await db.query<{ id: string }>(
+    `INSERT INTO users (name, email, password_hash, role) VALUES ('Jean', $1, $2, $3) RETURNING id`,
+    [username.toLowerCase(), await hashPassword(password), role]
+  );
+  await db.query('INSERT INTO user_settings (user_id) VALUES ($1::uuid)', [row.id]);
+  return row.id;
 }
 
 async function loginOk() {
@@ -104,17 +107,15 @@ describe('autenticação (usuário único)', () => {
 
   test('a senha não fica em texto puro no banco', async () => {
     await createUser();
-    const [row] = await db.query<{ password_hash: string }>('SELECT password_hash FROM app_user');
+    const [row] = await db.query<{ password_hash: string }>('SELECT password_hash FROM users');
     assert.ok(row.password_hash.startsWith('scrypt$'));
     assert.ok(!row.password_hash.includes('senha-de-teste-123'));
   });
 
-  test('não existe cadastro público e o banco só aceita um usuário', async () => {
+  test('o banco não aceita dois usuários com o mesmo e-mail', async () => {
     await createUser();
-    const r = await call('POST', '/register', { username: 'x', password: 'y' });
-    assert.equal(r.status, 401); // nem chega a existir rota pública de cadastro
     await assert.rejects(() =>
-      db.query("INSERT INTO app_user (id, username, password_hash) VALUES (2, 'outro', 'scrypt$x')")
+      db.query("INSERT INTO users (name, email, password_hash) VALUES ('Outro', 'jean', 'scrypt$x')")
     );
   });
 
@@ -541,7 +542,7 @@ describe('conta: trocar e-mail e senha', () => {
     cookie = '';
     assert.equal((await call('POST', '/login', { username: 'jean', password: 'senha-de-teste-123' })).status, 401);
     assert.equal((await call('POST', '/login', { username: 'jean', password: 'nova-senha-forte-1' })).status, 200);
-    const [row] = await db.query<{ password_hash: string }>('SELECT password_hash FROM app_user');
+    const [row] = await db.query<{ password_hash: string }>('SELECT password_hash FROM users');
     assert.ok(!row.password_hash.includes('nova-senha-forte-1'));
   });
 
@@ -551,5 +552,280 @@ describe('conta: trocar e-mail e senha', () => {
     }
     const r = await call('POST', '/account/password', { currentPassword: 'senha-de-teste-123', newPassword: 'nova-senha-forte-1' });
     assert.equal(r.status, 429);
+  });
+});
+
+// =====================================================================
+// Vários usuários
+// =====================================================================
+
+async function signupAs(name: string, email: string, password = 'senha-forte-123', ip = '10.0.0.1') {
+  cookie = '';
+  return call('POST', '/signup', { name, email, password }, { 'x-nf-client-connection-ip': ip });
+}
+
+describe('criar conta', () => {
+  test('cria a conta, entra automaticamente e não é administradora', async () => {
+    const r = await signupAs('Maria', ' Maria@Exemplo.com ');
+    assert.equal(r.status, 201, JSON.stringify(r.data));
+    const me = (await call('GET', '/me')).data;
+    assert.equal(me.authenticated, true);
+    assert.equal(me.user.email, 'maria@exemplo.com');
+    assert.equal(me.user.name, 'Maria');
+    assert.equal(me.user.role, 'user');
+    const [row] = await db.query<{ password_hash: string }>("SELECT password_hash FROM users WHERE email = 'maria@exemplo.com'");
+    assert.ok(row.password_hash.startsWith('scrypt$') && !row.password_hash.includes('senha-forte-123'));
+  });
+
+  test('não deixa o navegador escolher o papel (sem virar admin)', async () => {
+    cookie = '';
+    await call('POST', '/signup', { name: 'X', email: 'x@exemplo.com', password: 'senha-forte-123', role: 'admin' });
+    const [row] = await db.query<{ role: string }>("SELECT role FROM users WHERE email = 'x@exemplo.com'");
+    assert.equal(row.role, 'user');
+  });
+
+  test('e-mail já cadastrado é recusado (sem diferenciar maiúsculas)', async () => {
+    await signupAs('Maria', 'maria@exemplo.com');
+    const r = await signupAs('Outra', 'MARIA@exemplo.com');
+    assert.equal(r.status, 409);
+    const [{ n }] = await db.query<{ n: number }>('SELECT count(*)::int AS n FROM users');
+    assert.equal(n, 1);
+  });
+
+  test('validações do cadastro', async () => {
+    assert.equal((await signupAs('', 'a@b.com')).status, 400);
+    assert.equal((await signupAs('Ana', 'nao-e-email')).status, 400);
+    assert.equal((await signupAs('Ana', 'a@b.com', 'curta')).status, 400);
+  });
+
+  test('limita contas criadas pelo mesmo IP', async () => {
+    for (let i = 0; i < 5; i++) assert.equal((await signupAs(`U${i}`, `u${i}@exemplo.com`, 'senha-forte-123', '9.9.9.9')).status, 201);
+    assert.equal((await signupAs('U6', 'u6@exemplo.com', 'senha-forte-123', '9.9.9.9')).status, 429);
+    assert.equal((await signupAs('U7', 'u7@exemplo.com', 'senha-forte-123', '8.8.8.8')).status, 201);
+  });
+
+  test('conta nova começa vazia (sem mensagens, recentes ou cobranças)', async () => {
+    await signupAs('Maria', 'maria@exemplo.com');
+    const sync = (await call('GET', '/sync')).data;
+    assert.deepEqual(sync, { messages: [], recents: [] });
+    assert.equal((await call('GET', '/charges')).data.charges.length, 0);
+  });
+
+  test('erro de senha de uma conta não bloqueia o login de outra', async () => {
+    await createUser('jean');
+    await signupAs('Maria', 'maria@exemplo.com');
+    cookie = '';
+    for (let i = 0; i < 8; i++) await call('POST', '/login', { email: 'jean', password: 'errada' });
+    assert.equal((await call('POST', '/login', { email: 'jean', password: 'senha-de-teste-123' })).status, 429);
+    assert.equal((await call('POST', '/login', { email: 'maria@exemplo.com', password: 'senha-forte-123' })).status, 200);
+  });
+});
+
+describe('isolamento entre usuários', () => {
+  async function asJean() {
+    cookie = '';
+    await call('POST', '/login', { email: 'jean', password: 'senha-de-teste-123' });
+  }
+
+  test('cada um só vê e só altera os próprios dados financeiros', async () => {
+    await createUser('jean');
+    await asJean();
+    await setDefault(1000);
+    await call('POST', '/sends', { sends: [send('41999990001', new Date().toISOString())] });
+    const jeanCharge = (await call('GET', '/charges')).data.charges[0];
+    const exp = await call('POST', '/expenses', { description: 'Do Jean', amountCents: 500, category: 'outros', expenseDate: '2026-10-01' });
+    const jeanExpense = exp.data.expense;
+
+    await signupAs('Maria', 'maria@exemplo.com');
+    // Maria não enxerga nada do Jean
+    assert.equal((await call('GET', '/charges')).data.charges.length, 0);
+    assert.equal((await call('GET', '/expenses?month=2026-10')).data.expenses.length, 0);
+    assert.equal((await summary()).overall.soldCents, 0);
+    assert.equal((await call('GET', '/settings')).data.defaultAmountCents, null);
+    // ...nem consegue mexer trocando o id na requisição
+    assert.equal((await call('POST', `/charges/${jeanCharge.id}/pay`)).status, 404);
+    assert.equal((await call('PATCH', `/charges/${jeanCharge.id}`, { amountCents: 1 })).status, 404);
+    assert.equal((await call('GET', `/charges/${jeanCharge.id}/events`)).status, 404);
+    assert.equal((await call('PATCH', `/expenses/${jeanExpense.id}`, { amountCents: 1 })).status, 404);
+    await call('DELETE', `/expenses/${jeanExpense.id}`);
+    // reaproveitar o id de um envio do Jean não grava nada na conta dele
+    const reuse = await call('POST', '/sends', { sends: [{ ...send('41999990001', new Date().toISOString()), id: (await db.query<{ id: string }>('SELECT id FROM message_sends'))[0].id }] });
+    assert.equal(reuse.data.results[0].ok, false);
+    // reaproveitar o id de uma despesa do Jean é recusado
+    assert.equal((await call('POST', '/expenses', { id: jeanExpense.id, description: 'x', amountCents: 1, category: 'outros', expenseDate: '2026-10-01' })).status, 409);
+
+    // Os dados do Jean continuam intactos
+    await asJean();
+    const charges = (await call('GET', '/charges')).data.charges;
+    assert.equal(charges.length, 1);
+    assert.equal(charges[0].status, 'pendente');
+    assert.equal(charges[0].amountCents, 1000);
+    assert.equal((await call('GET', '/expenses?month=2026-10')).data.expenses.length, 1);
+  });
+
+  test('mesmo número cobrado por duas contas gera duas cobranças separadas', async () => {
+    await createUser('jean');
+    await asJean();
+    await setDefault(1000);
+    await call('POST', '/sends', { sends: [send('41999990002', new Date().toISOString())] });
+    await signupAs('Maria', 'maria@exemplo.com');
+    await setDefault(3000);
+    await call('POST', '/sends', { sends: [send('41999990002', new Date().toISOString())] });
+    assert.equal((await call('GET', '/charges')).data.charges[0].amountCents, 3000);
+    await asJean();
+    const c = (await call('GET', '/charges')).data.charges;
+    assert.equal(c.length, 1);
+    assert.equal(c[0].amountCents, 1000);
+    assert.equal(c[0].sendsCount, 1);
+  });
+
+  test('mensagens prontas e recentes são individuais', async () => {
+    await createUser('jean');
+    await asJean();
+    await call('PUT', '/messages/pack-1-pix', { name: 'Pix', text: 'Pix do Jean', position: 0 });
+    await call('POST', '/recents', { entries: [{ id: 'r1', phoneDigits: '5541999990003', phoneLocalDigits: '41999990003', messageId: null, messageName: null, messageText: '', sentAt: new Date().toISOString() }] });
+    await signupAs('Maria', 'maria@exemplo.com');
+    // mesmo id de mensagem, conta diferente: não sobrescreve a do Jean
+    await call('PUT', '/messages/pack-1-pix', { name: 'Pix', text: 'Pix da Maria', position: 0 });
+    await call('DELETE', '/recents/r1');
+    await call('POST', '/recents/clear', { before: new Date().toISOString() });
+    assert.equal((await call('GET', '/sync')).data.messages[0].text, 'Pix da Maria');
+    await asJean();
+    const sync = (await call('GET', '/sync')).data;
+    assert.equal(sync.messages[0].text, 'Pix do Jean');
+    assert.equal(sync.recents.length, 1);
+  });
+
+  test('trocar a senha derruba só as outras sessões da MESMA conta', async () => {
+    await createUser('jean');
+    await signupAs('Maria', 'maria@exemplo.com');
+    const maria = cookie;
+    await asJean();
+    await call('POST', '/account/password', { currentPassword: 'senha-de-teste-123', newPassword: 'nova-senha-forte-1' });
+    cookie = maria;
+    assert.equal((await call('GET', '/summary')).status, 200);
+  });
+
+  test('não dá para trocar o e-mail para um já usado por outra conta', async () => {
+    await createUser('outro@exemplo.com');
+    await signupAs('Maria', 'maria@exemplo.com');
+    const dup = await call('POST', '/account/email', { currentPassword: 'senha-forte-123', newEmail: 'OUTRO@exemplo.com' });
+    assert.equal(dup.status, 409);
+    const ok = await call('POST', '/account/email', { currentPassword: 'senha-forte-123', newEmail: 'maria2@exemplo.com' });
+    assert.equal(ok.status, 200);
+    assert.equal((await call('GET', '/me')).data.user.email, 'maria2@exemplo.com');
+  });
+
+  test('sem login, nenhuma rota de dados responde', async () => {
+    await createUser('jean');
+    cookie = '';
+    for (const [m, p, b] of [
+      ['GET', '/sync'],
+      ['PUT', '/messages/a', { name: 'a', text: 'b' }],
+      ['DELETE', '/messages/a'],
+      ['POST', '/recents', { entries: [] }],
+      ['DELETE', '/recents/a'],
+      ['POST', '/recents/clear', { before: new Date().toISOString() }],
+      ['GET', '/account'],
+    ] as const) {
+      assert.equal((await call(m, p, b)).status, 401, `${m} ${p}`);
+    }
+  });
+});
+
+describe('mensagens prontas e recentes no banco', () => {
+  async function login() {
+    await createUser('jean');
+    await call('POST', '/login', { email: 'jean', password: 'senha-de-teste-123' });
+  }
+
+  test('criar, editar, reordenar e excluir mensagens', async () => {
+    await login();
+    await call('PUT', '/messages/m1', { name: 'Um', text: 'Texto 1', position: 0 });
+    await call('PUT', '/messages/m2', { name: 'Dois', text: 'Texto 2', position: 1 });
+    await call('PUT', '/messages/m1', { name: 'Um (editada)', text: 'Texto 1b', position: 0 });
+    await call('PUT', '/messages/m1', { name: 'Um (editada)', text: 'Texto 1b', position: 0 }); // repetido
+    let msgs = (await call('GET', '/sync')).data.messages;
+    assert.deepEqual(msgs.map((m: any) => m.name), ['Um (editada)', 'Dois']);
+    await call('DELETE', '/messages/m1');
+    await call('DELETE', '/messages/m1'); // repetido não dá erro
+    msgs = (await call('GET', '/sync')).data.messages;
+    assert.deepEqual(msgs.map((m: any) => m.id), ['m2']);
+    assert.equal((await call('PUT', '/messages/m3', { name: '', text: 'x' })).status, 400);
+    assert.equal((await call('PUT', '/messages/m3', { name: 'x', text: '  ' })).status, 400);
+    assert.equal((await call('PUT', '/messages/a b', { name: 'x', text: 'y' })).status, 400);
+  });
+
+  test('recentes: adicionar (sem duplicar), excluir e limpar até um momento', async () => {
+    await login();
+    const e = (id: string, sentAt: string) => ({ id, phoneDigits: '5541999990004', phoneLocalDigits: '41999990004', messageId: 'x', messageName: 'Pix', messageText: 'Pix', sentAt });
+    const r = await call('POST', '/recents', { entries: [e('a', '2026-10-01T10:00:00Z'), e('b', '2026-10-02T10:00:00Z'), e('a', '2026-10-01T10:00:00Z')] });
+    assert.equal(r.data.inserted, 2);
+    assert.equal((await call('POST', '/recents', { entries: [e('a', '2026-10-01T10:00:00Z')] })).data.inserted, 0);
+    let rec = (await call('GET', '/sync')).data.recents;
+    assert.deepEqual(rec.map((x: any) => x.id), ['b', 'a']); // mais recente primeiro
+    await call('DELETE', '/recents/b');
+    await call('POST', '/recents', { entries: [e('c', '2026-10-05T10:00:00Z')] });
+    await call('POST', '/recents/clear', { before: '2026-10-03T00:00:00Z' });
+    rec = (await call('GET', '/sync')).data.recents;
+    assert.deepEqual(rec.map((x: any) => x.id), ['c']);
+  });
+
+  test('apagar dos Recentes não mexe no financeiro', async () => {
+    await login();
+    await setDefault(1000);
+    const s = send('41999990005', new Date().toISOString());
+    await call('POST', '/sends', { sends: [s] });
+    await call('POST', '/recents', { entries: [s] });
+    await call('POST', '/recents/clear', { before: new Date().toISOString() });
+    assert.equal((await call('GET', '/sync')).data.recents.length, 0);
+    assert.equal((await call('GET', '/charges')).data.charges.length, 1);
+  });
+});
+
+describe('migração preserva os dados da conta antiga', () => {
+  test('conta única antiga vira admin, mantém senha, sessão e dados', async () => {
+    const { PGlite } = await import('@electric-sql/pglite');
+    const { readFileSync } = await import('node:fs');
+    const pg = new PGlite();
+    const dir = new URL('../db/migrations/', import.meta.url);
+    await pg.exec(readFileSync(new URL('001_financeiro.sql', dir), 'utf8'));
+    const hash = await hashPassword('senha-antiga-123');
+    await pg.query("INSERT INTO app_user (id, username, password_hash) VALUES (1, 'acesso@discador.app', $1)", [hash]);
+    await pg.query('UPDATE settings SET default_amount_cents = 2500');
+    await pg.exec(`
+      INSERT INTO charges (id, phone_digits, phone_local_digits, amount_cents, status, charged_at, paid_at)
+        VALUES ('11111111-1111-4111-8111-111111111111', '5541999990000', '41999990000', 2500, 'pago', now(), now());
+      INSERT INTO message_sends (id, charge_id, phone_digits, phone_local_digits, sent_at)
+        VALUES ('22222222-2222-4222-8222-222222222222', '11111111-1111-4111-8111-111111111111', '5541999990000', '41999990000', now());
+      INSERT INTO expenses (description, amount_cents, category, expense_date) VALUES ('Internet', 1000, 'internet', current_date);
+    `);
+    await pg.exec(readFileSync(new URL('002_multiusuario.sql', dir), 'utf8'));
+    db = {
+      raw: pg,
+      async query(text: string, params: unknown[] = []) {
+        return (await pg.query(text, params)).rows as any[];
+      },
+      async transaction(statements: { text: string; params?: unknown[] }[]) {
+        return pg.transaction(async (tx) => {
+          const out: any[] = [];
+          for (const st of statements) out.push((await tx.query(st.text, st.params ?? [])).rows);
+          return out;
+        });
+      },
+    } as unknown as TestDb;
+    cookie = '';
+    // Entra com o MESMO e-mail e senha de antes
+    assert.equal((await call('POST', '/login', { email: 'acesso@discador.app', password: 'senha-antiga-123' })).status, 200);
+    const me = (await call('GET', '/me')).data.user;
+    assert.equal(me.role, 'admin');
+    const o = (await summary()).overall;
+    assert.equal(o.receivedCents, 2500);
+    assert.equal(o.expensesCents, 1000);
+    assert.equal(o.balanceCents, 1500);
+    assert.equal((await call('GET', '/settings')).data.defaultAmountCents, 2500);
+    // Uma conta nova não enxerga nada disso
+    await signupAs('Maria', 'maria@exemplo.com');
+    assert.equal((await summary()).overall.receivedCents, 0);
   });
 });

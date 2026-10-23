@@ -1,5 +1,6 @@
 /**
- * Cria (ou troca a senha do) usuário único do painel financeiro.
+ * Cria (ou troca a senha de) uma conta ADMINISTRADORA pelo terminal.
+ * (Contas comuns são criadas pelo próprio app, em "Criar conta".)
  *
  *   npm run criar-usuario
  *
@@ -44,10 +45,11 @@ function ask(question: string, hidden = false): Promise<string> {
 
 async function main() {
   loadDotEnv();
-  console.log('\nCriar usuário do painel financeiro (usuário único)\n');
+  console.log('\nCriar conta administradora\n');
 
-  const username = (await ask('Usuário: ')).trim();
-  if (!username) throw new Error('Usuário não pode ficar vazio.');
+  const name = (await ask('Nome: ')).trim() || 'Administrador';
+  const username = (await ask('E-mail: ')).trim().toLowerCase();
+  if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(username)) throw new Error('Digite um e-mail válido.');
 
   const password = await ask('Senha (mínimo 8 caracteres): ', true);
   if (password.length < 8) throw new Error('A senha precisa ter pelo menos 8 caracteres.');
@@ -59,23 +61,25 @@ async function main() {
 
   if (url) {
     const sql = neon(url);
-    await sql.query(
-      `INSERT INTO app_user (id, username, password_hash) VALUES (1, $1, $2)
-       ON CONFLICT (id) DO UPDATE SET username = EXCLUDED.username,
-         password_hash = EXCLUDED.password_hash, updated_at = now()`,
-      [username, hash]
-    );
-    // Troca de senha derruba todas as sessões abertas.
-    await sql.query('DELETE FROM sessions');
+    const rows = (await sql.query(
+      `INSERT INTO users (name, email, password_hash, role) VALUES ($1, $2, $3, 'admin')
+       ON CONFLICT (email) DO UPDATE SET password_hash = EXCLUDED.password_hash, updated_at = now()
+       RETURNING id`,
+      [name, username, hash]
+    )) as { id: string }[];
+    await sql.query('INSERT INTO user_settings (user_id) VALUES ($1::uuid) ON CONFLICT DO NOTHING', [rows[0].id]);
+    // Troca de senha derruba as sessões abertas dessa conta.
+    await sql.query('DELETE FROM sessions WHERE user_id = $1::uuid', [rows[0].id]);
     console.log(`\nPronto! Usuário "${username}" salvo no banco. Já pode entrar no painel.\n`);
     return;
   }
 
   const safeUser = username.replace(/'/g, "''");
+  const safeName = name.replace(/'/g, "''");
   console.log('\nDATABASE_URL não encontrada. Cole o comando abaixo no SQL Editor do Neon:\n');
   console.log(
-    `INSERT INTO app_user (id, username, password_hash) VALUES (1, '${safeUser}', '${hash}')\n` +
-      `ON CONFLICT (id) DO UPDATE SET username = EXCLUDED.username, password_hash = EXCLUDED.password_hash, updated_at = now();\n`
+    `INSERT INTO users (name, email, password_hash, role) VALUES ('${safeName}', '${safeUser}', '${hash}', 'admin')\n` +
+      `ON CONFLICT (email) DO UPDATE SET password_hash = EXCLUDED.password_hash, updated_at = now();\n`
   );
   console.log('(O comando contém só o hash da senha, nunca a senha em si.)\n');
 }

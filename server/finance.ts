@@ -9,9 +9,24 @@
  *  - Despesas  = soma das despesas não excluídas, pela data da despesa
  *  - Saldo     = Recebido - Despesas (pendente NUNCA entra no saldo)
  *  Cobranças canceladas e "sem valor" não entram em nenhuma soma.
+ *
+ * Isolamento: TODA consulta filtra pelo dono (user_id) da sessão. Um
+ * usuário nunca lê nem altera cobranças, envios ou despesas de outro,
+ * mesmo trocando o id na requisição (a resposta é "não encontrado").
  */
 import type { Db, Row } from './db';
 import { HttpError, isDay, isMonth, isUuid, num, optionalText, requireCents } from './http';
+
+/**
+ * Configurações do usuário como CTE de uma linha só (com valores padrão
+ * quando a linha ainda não existe). `param` é o placeholder do user_id.
+ */
+function settingsCte(param: string) {
+  return `s AS (
+    SELECT us.default_amount_cents, coalesce(us.timezone, 'America/Sao_Paulo') AS timezone
+      FROM (SELECT 1) one
+      LEFT JOIN user_settings us ON us.user_id = ${param}::uuid)`;
+}
 
 export const EXPENSE_CATEGORIES = [
   'ferramentas',
@@ -72,16 +87,21 @@ export function parseSend(raw: unknown): SendInput {
  *  - Caso contrário -> cria uma cobrança nova com o valor padrão.
  * Um lock por número serializa envios simultâneos do mesmo telefone.
  */
-export async function recordSend(db: Db, send: SendInput) {
+export async function recordSend(db: Db, userId: string, send: SendInput) {
+  // O id do envio vem do celular: se já existir em OUTRA conta, recusa.
+  const owner = await db.query<{ user_id: string }>('SELECT user_id FROM message_sends WHERE id = $1::uuid', [send.id]);
+  if (owner[0] && owner[0].user_id !== userId) throw new HttpError(400, 'Envio inválido.');
+
   const [, rows] = await db.transaction([
-    { text: 'SELECT pg_advisory_xact_lock(hashtext($1))', params: [send.phoneDigits] },
+    { text: 'SELECT pg_advisory_xact_lock(hashtext($1))', params: [`${userId}:${send.phoneDigits}`] },
     {
       text: `
-      WITH s AS (SELECT default_amount_cents, timezone FROM settings WHERE id = 1),
-      already AS (SELECT charge_id FROM message_sends WHERE id = $1::uuid),
+      WITH ${settingsCte('$8')},
+      already AS (SELECT charge_id FROM message_sends WHERE id = $1::uuid AND user_id = $8::uuid),
       reuse AS (
         SELECT c.id FROM charges c CROSS JOIN s
          WHERE NOT EXISTS (SELECT 1 FROM already)
+           AND c.user_id = $8::uuid
            AND c.phone_digits = $2
            AND c.status = 'pendente'
            AND (c.charged_at AT TIME ZONE s.timezone)::date
@@ -90,16 +110,16 @@ export async function recordSend(db: Db, send: SendInput) {
          LIMIT 1
       ),
       new_charge AS (
-        INSERT INTO charges (phone_digits, phone_local_digits, amount_cents, charged_at)
-        SELECT $2, $3, s.default_amount_cents, $7::timestamptz FROM s
+        INSERT INTO charges (user_id, phone_digits, phone_local_digits, amount_cents, charged_at)
+        SELECT $8::uuid, $2, $3, s.default_amount_cents, $7::timestamptz FROM s
          WHERE NOT EXISTS (SELECT 1 FROM already) AND NOT EXISTS (SELECT 1 FROM reuse)
         RETURNING id, amount_cents
       ),
       target AS (SELECT id FROM new_charge UNION ALL SELECT id FROM reuse),
       ins AS (
         INSERT INTO message_sends
-          (id, charge_id, phone_digits, phone_local_digits, message_id, message_name, message_text, sent_at)
-        SELECT $1::uuid, target.id, $2, $3, $4, $5, $6, $7::timestamptz FROM target
+          (id, user_id, charge_id, phone_digits, phone_local_digits, message_id, message_name, message_text, sent_at)
+        SELECT $1::uuid, $8::uuid, target.id, $2, $3, $4, $5, $6, $7::timestamptz FROM target
         RETURNING charge_id
       ),
       ev_new AS (
@@ -121,6 +141,7 @@ export async function recordSend(db: Db, send: SendInput) {
         send.messageName,
         send.messageText,
         send.sentAt,
+        userId,
       ],
     },
   ]);
@@ -167,15 +188,19 @@ function mapCharge(r: Row) {
 
 export type Charge = ReturnType<typeof mapCharge>;
 
-async function getCharge(db: Db, id: string): Promise<Charge> {
-  const rows = await db.query(`SELECT ${CHARGE_COLUMNS} FROM charges c WHERE c.id = $1::uuid`, [id]);
+async function getCharge(db: Db, userId: string, id: string): Promise<Charge> {
+  if (!isUuid(id)) throw new HttpError(400, 'Cobrança inválida.');
+  const rows = await db.query(
+    `SELECT ${CHARGE_COLUMNS} FROM charges c WHERE c.id = $1::uuid AND c.user_id = $2::uuid`,
+    [id, userId]
+  );
   if (!rows[0]) throw new HttpError(404, 'Cobrança não encontrada.');
   return mapCharge(rows[0]);
 }
 
-export async function listCharges(db: Db, params: URLSearchParams): Promise<Charge[]> {
-  const where: string[] = [];
-  const values: unknown[] = [];
+export async function listCharges(db: Db, userId: string, params: URLSearchParams): Promise<Charge[]> {
+  const where: string[] = ['c.user_id = $1::uuid'];
+  const values: unknown[] = [userId];
   const add = (sql: string, value: unknown) => {
     values.push(value);
     where.push(sql.replace('?', `$${values.length}`));
@@ -213,8 +238,10 @@ export async function listCharges(db: Db, params: URLSearchParams): Promise<Char
 
   const rows = await db.query(
     `SELECT ${CHARGE_COLUMNS}
-       FROM charges c CROSS JOIN (SELECT timezone FROM settings WHERE id = 1) s
-      ${where.length ? 'WHERE ' + where.join(' AND ') : ''}
+       FROM charges c CROSS JOIN (
+         SELECT coalesce((SELECT timezone FROM user_settings WHERE user_id = $1::uuid), 'America/Sao_Paulo') AS timezone
+       ) s
+      WHERE ${where.join(' AND ')}
       ORDER BY (c.status = 'pendente') DESC, c.charged_at DESC
       LIMIT 500`,
     values
@@ -229,26 +256,28 @@ export async function listCharges(db: Db, params: URLSearchParams): Promise<Char
  */
 async function transition(
   db: Db,
+  userId: string,
   id: string,
   sql: string,
   alreadyMessage: (current: Charge) => string | null
 ): Promise<{ charge: Charge; changed: boolean; message?: string }> {
-  if (!isUuid(id)) throw new HttpError(400, 'Cobrança inválida.');
-  const rows = await db.query(sql, [id]);
-  const charge = await getCharge(db, id);
+  await getCharge(db, userId, id); // 404 se a cobrança não for desta conta
+  const rows = await db.query(sql, [id, userId]);
+  const charge = await getCharge(db, userId, id);
   if (rows.length > 0) return { charge, changed: true };
   const message = alreadyMessage(charge);
   if (message === null) return { charge, changed: false };
   throw new HttpError(409, message);
 }
 
-export function markPaid(db: Db, id: string) {
+export function markPaid(db: Db, userId: string, id: string) {
   return transition(
     db,
+    userId,
     id,
     `WITH upd AS (
        UPDATE charges SET status = 'pago', paid_at = now(), updated_at = now()
-        WHERE id = $1::uuid AND status = 'pendente' AND amount_cents IS NOT NULL
+        WHERE id = $1::uuid AND user_id = $2::uuid AND status = 'pendente' AND amount_cents IS NOT NULL
         RETURNING id, amount_cents)
      INSERT INTO charge_events (charge_id, action, from_status, to_status, to_amount_cents)
      SELECT id, 'pago', 'pendente', 'pago', amount_cents FROM upd
@@ -262,11 +291,12 @@ export function markPaid(db: Db, id: string) {
   );
 }
 
-export function undoPayment(db: Db, id: string) {
+export function undoPayment(db: Db, userId: string, id: string) {
   return transition(
     db,
+    userId,
     id,
-    `WITH old AS (SELECT id, paid_at, amount_cents FROM charges WHERE id = $1::uuid AND status = 'pago' FOR UPDATE),
+    `WITH old AS (SELECT id, paid_at, amount_cents FROM charges WHERE id = $1::uuid AND user_id = $2::uuid AND status = 'pago' FOR UPDATE),
      upd AS (
        UPDATE charges c SET status = 'pendente', paid_at = NULL, updated_at = now()
          FROM old WHERE c.id = old.id
@@ -280,13 +310,14 @@ export function undoPayment(db: Db, id: string) {
   );
 }
 
-export function cancelCharge(db: Db, id: string) {
+export function cancelCharge(db: Db, userId: string, id: string) {
   return transition(
     db,
+    userId,
     id,
     `WITH upd AS (
        UPDATE charges SET status = 'cancelado', updated_at = now()
-        WHERE id = $1::uuid AND status = 'pendente'
+        WHERE id = $1::uuid AND user_id = $2::uuid AND status = 'pendente'
         RETURNING id, amount_cents)
      INSERT INTO charge_events (charge_id, action, from_status, to_status, from_amount_cents)
      SELECT id, 'cancelada', 'pendente', 'cancelado', amount_cents FROM upd
@@ -298,13 +329,14 @@ export function cancelCharge(db: Db, id: string) {
   );
 }
 
-export function reopenCharge(db: Db, id: string) {
+export function reopenCharge(db: Db, userId: string, id: string) {
   return transition(
     db,
+    userId,
     id,
     `WITH upd AS (
        UPDATE charges SET status = 'pendente', updated_at = now()
-        WHERE id = $1::uuid AND status = 'cancelado'
+        WHERE id = $1::uuid AND user_id = $2::uuid AND status = 'cancelado'
         RETURNING id, amount_cents)
      INSERT INTO charge_events (charge_id, action, from_status, to_status, to_amount_cents)
      SELECT id, 'reaberta', 'cancelado', 'pendente', amount_cents FROM upd
@@ -313,15 +345,14 @@ export function reopenCharge(db: Db, id: string) {
   );
 }
 
-export async function updateCharge(db: Db, id: string, body: Record<string, unknown>) {
-  if (!isUuid(id)) throw new HttpError(400, 'Cobrança inválida.');
-  await getCharge(db, id);
+export async function updateCharge(db: Db, userId: string, id: string, body: Record<string, unknown>) {
+  await getCharge(db, userId, id); // 404 se a cobrança não for desta conta
   const statements = [];
 
   if ('amountCents' in body) {
     const cents = requireCents(body.amountCents, 'valor');
     statements.push({
-      text: `WITH old AS (SELECT id, amount_cents, status FROM charges WHERE id = $1::uuid FOR UPDATE),
+      text: `WITH old AS (SELECT id, amount_cents, status FROM charges WHERE id = $1::uuid AND user_id = $3::uuid FOR UPDATE),
              upd AS (
                UPDATE charges c SET amount_cents = $2, updated_at = now()
                  FROM old WHERE c.id = old.id AND c.amount_cents IS DISTINCT FROM $2
@@ -329,14 +360,14 @@ export async function updateCharge(db: Db, id: string, body: Record<string, unkn
              INSERT INTO charge_events (charge_id, action, from_status, to_status, from_amount_cents, to_amount_cents)
              SELECT old.id, 'valor_alterado', old.status, old.status, old.amount_cents, $2
                FROM old JOIN upd ON upd.id = old.id`,
-      params: [id, cents],
+      params: [id, cents, userId],
     });
   }
 
   if ('contactName' in body) {
     const name = optionalText(body.contactName, 120);
     statements.push({
-      text: `WITH old AS (SELECT id, contact_name FROM charges WHERE id = $1::uuid FOR UPDATE),
+      text: `WITH old AS (SELECT id, contact_name FROM charges WHERE id = $1::uuid AND user_id = $3::uuid FOR UPDATE),
              upd AS (
                UPDATE charges c SET contact_name = $2, updated_at = now()
                  FROM old WHERE c.id = old.id AND c.contact_name IS DISTINCT FROM $2
@@ -345,17 +376,17 @@ export async function updateCharge(db: Db, id: string, body: Record<string, unkn
              SELECT old.id, 'nome_alterado',
                     coalesce(old.contact_name, '(sem nome)') || ' → ' || coalesce($2, '(sem nome)')
                FROM old JOIN upd ON upd.id = old.id`,
-      params: [id, name],
+      params: [id, name, userId],
     });
   }
 
   if (statements.length === 0) throw new HttpError(400, 'Nada para alterar.');
   await db.transaction(statements);
-  return getCharge(db, id);
+  return getCharge(db, userId, id);
 }
 
-export async function listChargeEvents(db: Db, id: string) {
-  if (!isUuid(id)) throw new HttpError(400, 'Cobrança inválida.');
+export async function listChargeEvents(db: Db, userId: string, id: string) {
+  await getCharge(db, userId, id); // 404 se a cobrança não for desta conta
   const rows = await db.query(
     `SELECT id, action, from_status, to_status, from_amount_cents, to_amount_cents, detail, created_at
        FROM charge_events WHERE charge_id = $1::uuid ORDER BY created_at, id`,
@@ -428,13 +459,13 @@ function parseExpense(body: Record<string, unknown>, partial: boolean) {
   return out;
 }
 
-export async function listExpenses(db: Db, params: URLSearchParams) {
+export async function listExpenses(db: Db, userId: string, params: URLSearchParams) {
   const month = params.get('month');
   const day = params.get('day');
   if (month && !isMonth(month)) throw new HttpError(400, 'Mês inválido.');
   if (day && !isDay(day)) throw new HttpError(400, 'Dia inválido.');
-  const where = ['deleted_at IS NULL'];
-  const values: unknown[] = [];
+  const where = ['deleted_at IS NULL', 'user_id = $1::uuid'];
+  const values: unknown[] = [userId];
   if (month) {
     values.push(month);
     where.push(`to_char(expense_date, 'YYYY-MM') = $${values.length}`);
@@ -451,46 +482,51 @@ export async function listExpenses(db: Db, params: URLSearchParams) {
   return rows.map(mapExpense);
 }
 
-export async function createExpense(db: Db, body: Record<string, unknown>) {
+export async function createExpense(db: Db, userId: string, body: Record<string, unknown>) {
   const e = parseExpense(body, false);
   // O id pode vir do navegador para que um clique duplo não grave duas vezes.
   const id = isUuid(body.id) ? (body.id as string) : null;
   const rows = await db.query(
-    `INSERT INTO expenses (id, description, amount_cents, category, expense_date, note)
-     VALUES (coalesce($1::uuid, gen_random_uuid()), $2, $3, $4, $5::date, $6)
+    `INSERT INTO expenses (id, user_id, description, amount_cents, category, expense_date, note)
+     VALUES (coalesce($1::uuid, gen_random_uuid()), $7::uuid, $2, $3, $4, $5::date, $6)
      ON CONFLICT (id) DO NOTHING
      RETURNING ${EXPENSE_COLUMNS}`,
-    [id, e.description, e.amount_cents, e.category, e.expense_date, e.note]
+    [id, e.description, e.amount_cents, e.category, e.expense_date, e.note, userId]
   );
   if (rows[0]) return { expense: mapExpense(rows[0]), created: true };
-  const existing = await db.query(`SELECT ${EXPENSE_COLUMNS} FROM expenses WHERE id = $1::uuid`, [id]);
+  const existing = await db.query(
+    `SELECT ${EXPENSE_COLUMNS} FROM expenses WHERE id = $1::uuid AND user_id = $2::uuid`,
+    [id, userId]
+  );
+  // Mesmo id já usado por OUTRA conta: recusa sem revelar nada.
+  if (!existing[0]) throw new HttpError(409, 'Não foi possível registrar a despesa. Tente de novo.');
   return { expense: mapExpense(existing[0]), created: false };
 }
 
-export async function updateExpense(db: Db, id: string, body: Record<string, unknown>) {
+export async function updateExpense(db: Db, userId: string, id: string, body: Record<string, unknown>) {
   if (!isUuid(id)) throw new HttpError(400, 'Despesa inválida.');
   const e = parseExpense(body, true);
   const keys = Object.keys(e);
   if (keys.length === 0) throw new HttpError(400, 'Nada para alterar.');
-  const sets = keys.map((k, i) => `${k} = $${i + 2}${k === 'expense_date' ? '::date' : ''}`);
+  const sets = keys.map((k, i) => `${k} = $${i + 3}${k === 'expense_date' ? '::date' : ''}`);
   const rows = await db.query(
     `UPDATE expenses SET ${sets.join(', ')}, updated_at = now()
-      WHERE id = $1::uuid AND deleted_at IS NULL
+      WHERE id = $1::uuid AND user_id = $2::uuid AND deleted_at IS NULL
       RETURNING ${EXPENSE_COLUMNS}`,
-    [id, ...keys.map((k) => e[k])]
+    [id, userId, ...keys.map((k) => e[k])]
   );
   if (!rows[0]) throw new HttpError(404, 'Despesa não encontrada.');
   return mapExpense(rows[0]);
 }
 
-export async function deleteExpense(db: Db, id: string) {
+export async function deleteExpense(db: Db, userId: string, id: string) {
   if (!isUuid(id)) throw new HttpError(400, 'Despesa inválida.');
   // Exclusão lógica: o registro fica no banco, mas sai de todos os totais.
   // Excluir de novo não faz nada.
   await db.query(
     `UPDATE expenses SET deleted_at = now(), updated_at = now()
-      WHERE id = $1::uuid AND deleted_at IS NULL`,
-    [id]
+      WHERE id = $1::uuid AND user_id = $2::uuid AND deleted_at IS NULL`,
+    [id, userId]
   );
 }
 
@@ -498,12 +534,14 @@ export async function deleteExpense(db: Db, id: string) {
 // Configurações
 // =====================================================================
 
-export async function getSettings(db: Db) {
+export async function getSettings(db: Db, userId: string) {
+  await db.query('INSERT INTO user_settings (user_id) VALUES ($1::uuid) ON CONFLICT DO NOTHING', [userId]);
   const rows = await db.query(
     `SELECT default_amount_cents, timezone,
             to_char(now() AT TIME ZONE timezone, 'YYYY-MM') AS current_month,
             (now() AT TIME ZONE timezone)::date::text AS today
-       FROM settings WHERE id = 1`
+       FROM user_settings WHERE user_id = $1::uuid`,
+    [userId]
   );
   const r = rows[0];
   if (!r) throw new HttpError(500, 'Configurações não encontradas. Rode a migração do banco.');
@@ -515,14 +553,15 @@ export async function getSettings(db: Db) {
   };
 }
 
-export async function updateSettings(db: Db, body: Record<string, unknown>) {
+export async function updateSettings(db: Db, userId: string, body: Record<string, unknown>) {
   if (!('defaultAmountCents' in body)) throw new HttpError(400, 'Nada para alterar.');
   const value = body.defaultAmountCents === null ? null : requireCents(body.defaultAmountCents, 'valor padrão');
   await db.query(
-    `UPDATE settings SET default_amount_cents = $1, updated_at = now() WHERE id = 1`,
-    [value]
+    `INSERT INTO user_settings (user_id, default_amount_cents) VALUES ($2::uuid, $1)
+     ON CONFLICT (user_id) DO UPDATE SET default_amount_cents = EXCLUDED.default_amount_cents, updated_at = now()`,
+    [value, userId]
   );
-  return getSettings(db);
+  return getSettings(db, userId);
 }
 
 // =====================================================================
@@ -531,18 +570,19 @@ export async function updateSettings(db: Db, body: Record<string, unknown>) {
 
 /** Filtros de período aplicados às três fontes (cobranças, pagamentos, despesas). */
 function periodSql(kind: 'all' | 'month') {
-  if (kind === 'all') return { charged: 'true', paid: 'true', expense: 'true' };
+  const own = { charged: 'c.user_id = $1::uuid', expense: 'e.user_id = $1::uuid' };
+  if (kind === 'all') return { charged: own.charged, paid: own.charged, expense: own.expense };
   return {
-    charged: `to_char(c.charged_at AT TIME ZONE s.timezone, 'YYYY-MM') = $1`,
-    paid: `to_char(c.paid_at AT TIME ZONE s.timezone, 'YYYY-MM') = $1`,
-    expense: `to_char(e.expense_date, 'YYYY-MM') = $1`,
+    charged: `${own.charged} AND to_char(c.charged_at AT TIME ZONE s.timezone, 'YYYY-MM') = $2`,
+    paid: `${own.charged} AND to_char(c.paid_at AT TIME ZONE s.timezone, 'YYYY-MM') = $2`,
+    expense: `${own.expense} AND to_char(e.expense_date, 'YYYY-MM') = $2`,
   };
 }
 
-async function totals(db: Db, kind: 'all' | 'month', month?: string) {
+async function totals(db: Db, userId: string, kind: 'all' | 'month', month?: string) {
   const p = periodSql(kind);
   const rows = await db.query(
-    `WITH s AS (SELECT timezone FROM settings WHERE id = 1)
+    `WITH ${settingsCte('$1')}
      SELECT
        (SELECT coalesce(sum(c.amount_cents), 0) FROM charges c, s
          WHERE c.status IN ('pendente', 'pago') AND ${p.charged}) AS sold,
@@ -560,7 +600,7 @@ async function totals(db: Db, kind: 'all' | 'month', month?: string) {
          WHERE c.status = 'pendente' AND c.amount_cents IS NOT NULL AND ${p.charged}) AS pending_count,
        (SELECT count(*) FROM charges c, s
          WHERE c.status = 'pendente' AND c.amount_cents IS NULL AND ${p.charged}) AS no_value_count`,
-    kind === 'month' ? [month] : []
+    kind === 'month' ? [userId, month] : [userId]
   );
   const r = rows[0];
   const received = num(r.received);
@@ -578,20 +618,20 @@ async function totals(db: Db, kind: 'all' | 'month', month?: string) {
   };
 }
 
-async function days(db: Db, month: string) {
+async function days(db: Db, userId: string, month: string) {
   const rows = await db.query(
-    `WITH s AS (SELECT timezone FROM settings WHERE id = 1),
+    `WITH ${settingsCte('$2')},
      ch AS (
        SELECT (c.charged_at AT TIME ZONE s.timezone)::date AS d, c.status, c.amount_cents
          FROM charges c, s
-        WHERE to_char(c.charged_at AT TIME ZONE s.timezone, 'YYYY-MM') = $1),
+        WHERE c.user_id = $2::uuid AND to_char(c.charged_at AT TIME ZONE s.timezone, 'YYYY-MM') = $1),
      pd AS (
        SELECT (c.paid_at AT TIME ZONE s.timezone)::date AS d, c.amount_cents
          FROM charges c, s
-        WHERE c.status = 'pago' AND to_char(c.paid_at AT TIME ZONE s.timezone, 'YYYY-MM') = $1),
+        WHERE c.user_id = $2::uuid AND c.status = 'pago' AND to_char(c.paid_at AT TIME ZONE s.timezone, 'YYYY-MM') = $1),
      ex AS (
        SELECT e.expense_date AS d, e.amount_cents FROM expenses e
-        WHERE e.deleted_at IS NULL AND to_char(e.expense_date, 'YYYY-MM') = $1),
+        WHERE e.user_id = $2::uuid AND e.deleted_at IS NULL AND to_char(e.expense_date, 'YYYY-MM') = $1),
      all_days AS (SELECT d FROM ch UNION SELECT d FROM pd UNION SELECT d FROM ex)
      SELECT a.d::text AS day,
        (SELECT count(*) FROM ch WHERE ch.d = a.d AND ch.status IN ('pendente', 'pago')) AS charges_count,
@@ -601,7 +641,7 @@ async function days(db: Db, month: string) {
        (SELECT coalesce(sum(amount_cents), 0) FROM ex WHERE ex.d = a.d) AS expenses
        FROM all_days a
       ORDER BY a.d DESC`,
-    [month]
+    [month, userId]
   );
   return rows.map((r) => {
     const received = num(r.received);
@@ -618,14 +658,14 @@ async function days(db: Db, month: string) {
   });
 }
 
-export async function getSummary(db: Db, params: URLSearchParams) {
-  const settings = await getSettings(db);
+export async function getSummary(db: Db, userId: string, params: URLSearchParams) {
+  const settings = await getSettings(db, userId);
   const month = params.get('month') ?? settings.currentMonth;
   if (!isMonth(month)) throw new HttpError(400, 'Mês inválido.');
   const [overall, monthTotals, dayRows] = await Promise.all([
-    totals(db, 'all'),
-    totals(db, 'month', month),
-    days(db, month),
+    totals(db, userId, 'all'),
+    totals(db, userId, 'month', month),
+    days(db, userId, month),
   ]);
   return { month, currentMonth: settings.currentMonth, today: settings.today, overall, monthTotals, days: dayRows };
 }

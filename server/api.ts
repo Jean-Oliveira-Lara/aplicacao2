@@ -1,18 +1,13 @@
 /**
- * Roteador da API do painel financeiro. Uma única Netlify Function
+ * Roteador da API do app. Uma única Netlify Function
  * (netlify/functions/api.mts) entrega todas as requisições para cá.
+ *
+ * Só /me, /login, /signup e /logout são públicas. Todo o resto exige
+ * sessão válida, e cada operação recebe o id do usuário da sessão:
+ * nunca um id vindo do navegador.
  */
 import type { Db } from './db';
-import {
-  changeEmail,
-  changePassword,
-  getAccount,
-  hasValidSession,
-  isUserConfigured,
-  login,
-  logout,
-  requireSession,
-} from './auth';
+import { changeEmail, changePassword, getAccount, getSessionUser, login, logout, requireUser, signup } from './auth';
 import {
   cancelCharge,
   createExpense,
@@ -32,6 +27,7 @@ import {
   updateSettings,
 } from './finance';
 import { HttpError, assertSameOrigin, json, readJson } from './http';
+import { addRecents, clearRecents, deleteMessage, deleteRecent, getSyncData, upsertMessage } from './sync';
 
 const MAX_SENDS_PER_BATCH = 50;
 
@@ -55,16 +51,19 @@ export async function handleApi(req: Request, db: Db): Promise<Response> {
 
     // ---------- rotas públicas ----------
     if (path === '/me' && method === 'GET') {
-      const [authenticated, userConfigured] = await Promise.all([
-        hasValidSession(req, db),
-        isUserConfigured(db),
-      ]);
-      return json({ authenticated, userConfigured });
+      const user = await getSessionUser(req, db);
+      // userConfigured fica sempre true: com "Criar conta" sempre dá para entrar.
+      return json({ authenticated: Boolean(user), userConfigured: true, user });
     }
     if (path === '/login' && method === 'POST') {
       const body = await readJson(req);
-      const cookie = await login(req, db, body.username, body.password);
+      // Aceita "email" (novo) e "username" (versão anterior do app).
+      const cookie = await login(req, db, body.email ?? body.username, body.password);
       return json({ ok: true }, 200, { 'set-cookie': cookie });
+    }
+    if (path === '/signup' && method === 'POST') {
+      const cookie = await signup(req, db, await readJson(req));
+      return json({ ok: true }, 201, { 'set-cookie': cookie });
     }
     if (path === '/logout' && method === 'POST') {
       const cookie = await logout(req, db);
@@ -72,8 +71,31 @@ export async function handleApi(req: Request, db: Db): Promise<Response> {
     }
 
     // ---------- daqui para baixo, só com login ----------
-    await requireSession(req, db);
+    const user = await requireUser(req, db);
+    const uid = user.id;
 
+    // ---------- discador: mensagens prontas e Recentes ----------
+    if (path === '/sync' && method === 'GET') return json(await getSyncData(db, uid));
+
+    const messageMatch = path.match(/^\/messages\/([^/]+)$/);
+    if (messageMatch) {
+      const id = decodeURIComponent(messageMatch[1]);
+      if (method === 'PUT') return json({ message: await upsertMessage(db, uid, id, await readJson(req)) });
+      if (method === 'DELETE') {
+        await deleteMessage(db, uid, id);
+        return json({ ok: true });
+      }
+    }
+
+    if (path === '/recents' && method === 'POST') return json(await addRecents(db, uid, await readJson(req)));
+    if (path === '/recents/clear' && method === 'POST') return json(await clearRecents(db, uid, await readJson(req)));
+    const recentMatch = path.match(/^\/recents\/([^/]+)$/);
+    if (recentMatch && method === 'DELETE') {
+      await deleteRecent(db, uid, decodeURIComponent(recentMatch[1]));
+      return json({ ok: true });
+    }
+
+    // ---------- financeiro ----------
     if (path === '/sends' && method === 'POST') {
       const body = await readJson<{ sends?: unknown[] }>(req);
       if (!Array.isArray(body.sends) || body.sends.length === 0) {
@@ -83,7 +105,7 @@ export async function handleApi(req: Request, db: Db): Promise<Response> {
       const results = [];
       for (const raw of body.sends) {
         try {
-          results.push({ ok: true, ...(await recordSend(db, parseSend(raw))) });
+          results.push({ ok: true, ...(await recordSend(db, uid, parseSend(raw))) });
         } catch (error) {
           // Envio malformado: devolve o erro só desse item, para o celular
           // descartá-lo da fila sem travar os outros.
@@ -98,44 +120,44 @@ export async function handleApi(req: Request, db: Db): Promise<Response> {
       return json({ results });
     }
 
-    if (path === '/account' && method === 'GET') return json(await getAccount(db));
+    if (path === '/account' && method === 'GET') return json(await getAccount(user));
     if (path === '/account/email' && method === 'POST') {
       const body = await readJson(req);
-      return json(await changeEmail(db, body.currentPassword, body.newEmail));
+      return json(await changeEmail(req, db, user, body.currentPassword, body.newEmail));
     }
     if (path === '/account/password' && method === 'POST') {
       const body = await readJson(req);
-      return json(await changePassword(req, db, body.currentPassword, body.newPassword));
+      return json(await changePassword(req, db, user, body.currentPassword, body.newPassword));
     }
 
-    if (path === '/summary' && method === 'GET') return json(await getSummary(db, url.searchParams));
+    if (path === '/summary' && method === 'GET') return json(await getSummary(db, uid, url.searchParams));
 
     if (path === '/settings') {
-      if (method === 'GET') return json(await getSettings(db));
-      if (method === 'PATCH') return json(await updateSettings(db, await readJson(req)));
+      if (method === 'GET') return json(await getSettings(db, uid));
+      if (method === 'PATCH') return json(await updateSettings(db, uid, await readJson(req)));
     }
 
     if (path === '/charges' && method === 'GET') {
-      return json({ charges: await listCharges(db, url.searchParams) });
+      return json({ charges: await listCharges(db, uid, url.searchParams) });
     }
 
     const chargeMatch = path.match(/^\/charges\/([^/]+)(?:\/([a-z-]+))?$/);
     if (chargeMatch) {
       const [, id, action] = chargeMatch;
-      if (!action && method === 'PATCH') return json({ charge: await updateCharge(db, id, await readJson(req)) });
-      if (action === 'events' && method === 'GET') return json(await listChargeEvents(db, id));
+      if (!action && method === 'PATCH') return json({ charge: await updateCharge(db, uid, id, await readJson(req)) });
+      if (action === 'events' && method === 'GET') return json(await listChargeEvents(db, uid, id));
       if (method === 'POST') {
-        if (action === 'pay') return json(await markPaid(db, id));
-        if (action === 'unpay') return json(await undoPayment(db, id));
-        if (action === 'cancel') return json(await cancelCharge(db, id));
-        if (action === 'reopen') return json(await reopenCharge(db, id));
+        if (action === 'pay') return json(await markPaid(db, uid, id));
+        if (action === 'unpay') return json(await undoPayment(db, uid, id));
+        if (action === 'cancel') return json(await cancelCharge(db, uid, id));
+        if (action === 'reopen') return json(await reopenCharge(db, uid, id));
       }
     }
 
     if (path === '/expenses') {
-      if (method === 'GET') return json({ expenses: await listExpenses(db, url.searchParams) });
+      if (method === 'GET') return json({ expenses: await listExpenses(db, uid, url.searchParams) });
       if (method === 'POST') {
-        const result = await createExpense(db, await readJson(req));
+        const result = await createExpense(db, uid, await readJson(req));
         return json(result, result.created ? 201 : 200);
       }
     }
@@ -143,9 +165,9 @@ export async function handleApi(req: Request, db: Db): Promise<Response> {
     const expenseMatch = path.match(/^\/expenses\/([^/]+)$/);
     if (expenseMatch) {
       const [, id] = expenseMatch;
-      if (method === 'PATCH') return json({ expense: await updateExpense(db, id, await readJson(req)) });
+      if (method === 'PATCH') return json({ expense: await updateExpense(db, uid, id, await readJson(req)) });
       if (method === 'DELETE') {
-        await deleteExpense(db, id);
+        await deleteExpense(db, uid, id);
         return json({ ok: true });
       }
     }
@@ -153,7 +175,7 @@ export async function handleApi(req: Request, db: Db): Promise<Response> {
     throw new HttpError(404, 'Rota não encontrada.');
   } catch (error) {
     if (error instanceof HttpError) return json({ error: error.message }, error.status);
-    console.error('Erro na API financeira:', error);
+    console.error('Erro na API:', error);
     return json({ error: 'Erro interno. Tente de novo em instantes.' }, 500);
   }
 }

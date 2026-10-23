@@ -8,8 +8,9 @@ import type { Db, Row, Statement } from '../server/db.ts';
 
 export async function createTestDb(): Promise<Db & { raw: PGlite }> {
   const pg = new PGlite();
-  const migration = readFileSync(new URL('../db/migrations/001_financeiro.sql', import.meta.url), 'utf8');
-  await pg.exec(migration);
+  for (const file of ['001_financeiro.sql', '002_multiusuario.sql']) {
+    await pg.exec(readFileSync(new URL(`../db/migrations/${file}`, import.meta.url), 'utf8'));
+  }
   return {
     raw: pg,
     async query<T extends Row = Row>(text: string, params: unknown[] = []) {
