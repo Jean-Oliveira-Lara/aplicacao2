@@ -7,13 +7,22 @@
  * implementation will, and this keeps callers unchanged when that swap
  * happens.
  */
+import { scopedKey } from '../auth/session';
+
 export interface StorageDriver {
   get<T>(key: string): Promise<T | null>;
   set<T>(key: string, value: T): Promise<void>;
 }
 
+/**
+ * Cópia local POR CONTA: cada chave ganha o sufixo da conta logada
+ * (ver src/auth/session.ts). O banco de dados é a fonte oficial; esta
+ * cópia deixa o discador funcionar sem internet.
+ */
 class LocalStorageDriver implements StorageDriver {
-  async get<T>(key: string): Promise<T | null> {
+  async get<T>(baseKey: string): Promise<T | null> {
+    const key = scopedKey(baseKey);
+    if (!key) return null;
     try {
       const raw = window.localStorage.getItem(key);
       if (raw === null) return null;
@@ -24,7 +33,9 @@ class LocalStorageDriver implements StorageDriver {
     }
   }
 
-  async set<T>(key: string, value: T): Promise<void> {
+  async set<T>(baseKey: string, value: T): Promise<void> {
+    const key = scopedKey(baseKey);
+    if (!key) return;
     try {
       window.localStorage.setItem(key, JSON.stringify(value));
     } catch (error) {

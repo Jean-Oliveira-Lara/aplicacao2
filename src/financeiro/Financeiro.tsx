@@ -4,6 +4,7 @@
  */
 import { useCallback, useEffect, useState } from 'react';
 import { AUTH_EXPIRED_EVENT, api } from './api';
+import { LOGOUT_EVENT } from '../auth/session';
 import AjustesTab from './AjustesTab';
 import CobrancasTab from './CobrancasTab';
 import type { ChargeFilters } from './CobrancasTab';
@@ -93,7 +94,8 @@ export default function Financeiro() {
     try {
       await api.logout();
     } finally {
-      setAuth({ status: 'out', userConfigured: true });
+      // Sair encerra a sessão do app inteiro: volta para a tela de login.
+      window.dispatchEvent(new Event(LOGOUT_EVENT));
     }
   }
 

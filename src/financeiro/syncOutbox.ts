@@ -12,6 +12,7 @@
  * Se ainda não houver login, os envios ficam guardados até você entrar.
  */
 import type { HistoryEntry } from '../types';
+import { scopedKey } from '../auth/session';
 
 const OUTBOX_KEY = 'discador:sync-outbox';
 const BATCH_SIZE = 20;
@@ -49,7 +50,10 @@ function randomUuid(): string {
 
 function read(): OutboxItem[] {
   try {
-    const raw = window.localStorage.getItem(OUTBOX_KEY);
+    // Fila separada por conta (ninguém logado = nada para enviar).
+    const key = scopedKey(OUTBOX_KEY);
+    if (!key) return [];
+    const raw = window.localStorage.getItem(key);
     const parsed = raw ? (JSON.parse(raw) as unknown) : [];
     return Array.isArray(parsed) ? (parsed as OutboxItem[]) : [];
   } catch {
@@ -59,7 +63,8 @@ function read(): OutboxItem[] {
 
 function write(items: OutboxItem[]): void {
   try {
-    window.localStorage.setItem(OUTBOX_KEY, JSON.stringify(items));
+    const key = scopedKey(OUTBOX_KEY);
+    if (key) window.localStorage.setItem(key, JSON.stringify(items));
   } catch (error) {
     console.error('Falha ao salvar a fila de sincronização', error);
   }
@@ -106,52 +111,55 @@ export function enqueueSend(entry: HistoryEntry): void {
 /** Manda a fila para o servidor. Chamadas simultâneas compartilham a mesma execução. */
 export function flushOutbox(): Promise<SyncState> {
   if (flushing) return flushing;
-  flushing = (async () => {
-    try {
-      let items = read();
-      while (items.length > 0) {
-        const batch = items.slice(0, BATCH_SIZE);
-        const body = JSON.stringify({ sends: batch });
-        let res: Response;
-        try {
-          res = await fetch('/api/sends', {
-            method: 'POST',
-            credentials: 'same-origin',
-            headers: { 'content-type': 'application/json' },
-            body,
-            keepalive: body.length < 60_000,
-          });
-        } catch {
-          setState({ lastError: 'Sem conexão. Os envios serão sincronizados depois.' });
-          break;
-        }
-        if (res.status === 401) {
-          setState({ needsLogin: true, lastError: null });
-          break;
-        }
-        if (!res.ok) {
-          setState({ lastError: 'O servidor não respondeu. Nova tentativa em instantes.' });
-          break;
-        }
-        const data = (await res.json()) as { results?: { id: string | null; ok: boolean; error?: string }[] };
-        const done = new Set<string>();
-        for (const result of data.results ?? []) {
-          if (result.id) done.add(result.id.toLowerCase());
-          if (!result.ok) console.warn('Envio recusado pelo servidor e descartado da fila:', result.error);
-        }
-        // Relê a fila: novos envios podem ter entrado enquanto esperávamos.
-        const remaining = read().filter((item) => !done.has(item.id.toLowerCase()));
-        write(remaining);
-        setState({ needsLogin: false, lastError: null });
-        if (done.size === 0) break; // resposta inesperada: evita laço infinito
-        items = remaining;
-      }
-      return getSyncState();
-    } finally {
-      flushing = null;
-    }
-  })();
+  // O "finally" precisa rodar DEPOIS da atribuição abaixo. Antes ficava
+  // dentro da função: com a fila vazia ela terminava na hora, o "finally"
+  // rodava antes da atribuição e a fila ficava travada até recarregar.
+  flushing = runFlush().finally(() => {
+    flushing = null;
+  });
   return flushing;
+}
+
+async function runFlush(): Promise<SyncState> {
+  let items = read();
+  while (items.length > 0) {
+    const batch = items.slice(0, BATCH_SIZE);
+    const body = JSON.stringify({ sends: batch });
+    let res: Response;
+    try {
+      res = await fetch('/api/sends', {
+        method: 'POST',
+        credentials: 'same-origin',
+        headers: { 'content-type': 'application/json' },
+        body,
+        keepalive: body.length < 60_000,
+      });
+    } catch {
+      setState({ lastError: 'Sem conexão. Os envios serão sincronizados depois.' });
+      break;
+    }
+    if (res.status === 401) {
+      setState({ needsLogin: true, lastError: null });
+      break;
+    }
+    if (!res.ok) {
+      setState({ lastError: 'O servidor não respondeu. Nova tentativa em instantes.' });
+      break;
+    }
+    const data = (await res.json()) as { results?: { id: string | null; ok: boolean; error?: string }[] };
+    const done = new Set<string>();
+    for (const result of data.results ?? []) {
+      if (result.id) done.add(result.id.toLowerCase());
+      if (!result.ok) console.warn('Envio recusado pelo servidor e descartado da fila:', result.error);
+    }
+    // Relê a fila: novos envios podem ter entrado enquanto esperávamos.
+    const remaining = read().filter((item) => !done.has(item.id.toLowerCase()));
+    write(remaining);
+    setState({ needsLogin: false, lastError: null });
+    if (done.size === 0) break; // resposta inesperada: evita laço infinito
+    items = remaining;
+  }
+  return getSyncState();
 }
 
 // Gatilhos automáticos (registrados uma vez, quando o app carrega).

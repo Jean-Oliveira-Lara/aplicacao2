@@ -1,6 +1,7 @@
 import { Suspense, lazy, useEffect } from 'react';
 import { Route, Routes } from 'react-router-dom';
 import AppShell from './components/AppShell';
+import AuthGate from './auth/AuthGate';
 import Home from './pages/Home';
 import Recentes from './pages/Recentes';
 
@@ -28,19 +29,21 @@ export default function App() {
   }, []);
 
   return (
-    <AppShell>
-      <Routes>
-        <Route path="/" element={<Home />} />
-        <Route path="/recentes" element={<Recentes />} />
-        <Route
-          path="/financeiro"
-          element={
-            <Suspense fallback={null}>
-              <Financeiro />
-            </Suspense>
-          }
-        />
-      </Routes>
-    </AppShell>
+    <AuthGate>
+      <AppShell>
+        <Routes>
+          <Route path="/" element={<Home />} />
+          <Route path="/recentes" element={<Recentes />} />
+          <Route
+            path="/financeiro"
+            element={
+              <Suspense fallback={null}>
+                <Financeiro />
+              </Suspense>
+            }
+          />
+        </Routes>
+      </AppShell>
+    </AuthGate>
   );
 }

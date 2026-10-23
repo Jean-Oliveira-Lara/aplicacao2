@@ -1,4 +1,6 @@
 /** Cliente da API do painel financeiro (Netlify Functions em /api). */
+import { AUTH_EXPIRED_EVENT } from '../auth/session';
+import type { SessionUser } from '../auth/session';
 
 export type ChargeStatus = 'pendente' | 'pago' | 'cancelado';
 
@@ -89,8 +91,8 @@ export class ApiError extends Error {
   }
 }
 
-/** Disparado quando a sessão expira, para o painel voltar à tela de login. */
-export const AUTH_EXPIRED_EVENT = 'financeiro:auth-expired';
+/** Disparado quando a sessão expira, para o app voltar à tela de login. */
+export { AUTH_EXPIRED_EVENT };
 
 async function request<T>(method: string, path: string, body?: unknown): Promise<T> {
   let res: Response;
@@ -121,8 +123,10 @@ async function request<T>(method: string, path: string, body?: unknown): Promise
 }
 
 export const api = {
-  me: () => request<{ authenticated: boolean; userConfigured: boolean }>('GET', '/me'),
-  login: (username: string, password: string) => request<{ ok: true }>('POST', '/login', { username, password }),
+  me: () => request<{ authenticated: boolean; userConfigured: boolean; user: SessionUser | null }>('GET', '/me'),
+  login: (email: string, password: string) => request<{ ok: true }>('POST', '/login', { email, password }),
+  signup: (name: string, email: string, password: string) =>
+    request<{ ok: true }>('POST', '/signup', { name, email, password }),
   logout: () => request<{ ok: true }>('POST', '/logout'),
 
   summary: (month?: string) => request<Summary>('GET', `/summary${month ? `?month=${month}` : ''}`),

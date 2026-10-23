@@ -3,11 +3,13 @@ import type { FormEvent } from 'react';
 import { api } from './api';
 
 interface LoginFormProps {
-  userConfigured: boolean;
+  userConfigured?: boolean;
   onLoggedIn: () => void;
+  /** Mostra o link "Criar conta" embaixo do botão Entrar. */
+  onCreateAccount?: () => void;
 }
 
-export default function LoginForm({ userConfigured, onLoggedIn }: LoginFormProps) {
+export default function LoginForm({ onLoggedIn, onCreateAccount }: LoginFormProps) {
   const [username, setUsername] = useState('');
   const [password, setPassword] = useState('');
   const [error, setError] = useState<string | null>(null);
@@ -31,15 +33,8 @@ export default function LoginForm({ userConfigured, onLoggedIn }: LoginFormProps
 
   return (
     <form className="fin-card fin-login" onSubmit={handleSubmit}>
-      <h2 className="fin-card__title">Entrar no painel</h2>
-      <p className="fin-muted">O painel financeiro é protegido. Só a conta cadastrada tem acesso.</p>
-
-      {!userConfigured && (
-        <p className="fin-alert">
-          Nenhum usuário foi criado ainda. Crie o usuário com o comando <code>npm run criar-usuario</code>{' '}
-          (instruções no README).
-        </p>
-      )}
+      <h2 className="fin-card__title">Entrar</h2>
+      <p className="fin-muted">Entre com a sua conta para usar o discador e o painel financeiro.</p>
 
       <label className="fin-label" htmlFor="fin-user">E-mail</label>
       <input
@@ -71,6 +66,15 @@ export default function LoginForm({ userConfigured, onLoggedIn }: LoginFormProps
       <button type="submit" className="fin-btn fin-btn--primary fin-btn--block" disabled={busy}>
         {busy ? 'Entrando…' : 'Entrar'}
       </button>
+
+      {onCreateAccount && (
+        <p className="fin-auth-switch">
+          Ainda não tem conta?{' '}
+          <button type="button" className="fin-link" onClick={onCreateAccount}>
+            Criar conta
+          </button>
+        </p>
+      )}
     </form>
   );
 }

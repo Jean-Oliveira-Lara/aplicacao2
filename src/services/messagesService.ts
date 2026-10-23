@@ -1,10 +1,22 @@
 import type { QuickMessage } from '../types';
 import { storage, STORAGE_KEYS } from './storage';
-import { applyMessagePacks } from './messagePacks';
+import { queueOp } from '../auth/syncQueue';
 
-// A antiga "Mensagem inicial" foi removida a pedido; a lista começa com
-// as mensagens dos pacotes (messagePacks.ts).
+// Cada conta começa com a lista vazia. (As mensagens que já estavam no
+// celular passam para a conta no primeiro login: ver auth/syncQueue.ts.)
 const DEFAULT_MESSAGES: QuickMessage[] = [];
+
+/** Manda a mensagem (nova ou editada) para o banco, na posição atual da lista. */
+function queueUpsert(message: QuickMessage, list: QuickMessage[]) {
+  queueOp({
+    kind: 'msg-upsert',
+    id: message.id,
+    name: message.name,
+    text: message.text,
+    position: Math.max(0, list.findIndex((m) => m.id === message.id)),
+    createdAt: message.createdAt,
+  });
+}
 
 function makeId(): string {
   return typeof crypto !== 'undefined' && 'randomUUID' in crypto
@@ -13,8 +25,6 @@ function makeId(): string {
 }
 
 export async function getMessages(): Promise<QuickMessage[]> {
-  // Soma as mensagens dos pacotes novos (uma vez por aparelho).
-  applyMessagePacks(DEFAULT_MESSAGES);
   const stored = await storage.get<QuickMessage[]>(STORAGE_KEYS.messages);
   if (stored && stored.length > 0) return stored;
   // Seed with a starter message on first run so the app isn't empty.
@@ -34,6 +44,7 @@ export async function createMessage(name: string, text: string): Promise<QuickMe
   };
   const updated = [...messages, newMessage];
   await storage.set(STORAGE_KEYS.messages, updated);
+  queueUpsert(newMessage, updated);
   return newMessage;
 }
 
@@ -49,6 +60,8 @@ export async function updateMessage(
       : message
   );
   await storage.set(STORAGE_KEYS.messages, updated);
+  const edited = updated.find((message) => message.id === id);
+  if (edited) queueUpsert(edited, updated);
   return updated;
 }
 
@@ -56,5 +69,6 @@ export async function deleteMessage(id: string): Promise<QuickMessage[]> {
   const messages = await getMessages();
   const updated = messages.filter((message) => message.id !== id);
   await storage.set(STORAGE_KEYS.messages, updated);
+  queueOp({ kind: 'msg-delete', id });
   return updated;
 }

@@ -928,3 +928,15 @@ textarea.fin-input {
 .fin-account-logout {
   margin-top: 16px;
 }
+
+/* ---------- login / criar conta ---------- */
+.fin-auth-switch {
+  margin: 14px 0 0;
+  text-align: center;
+  font-size: 14px;
+  color: var(--color-text-muted);
+}
+
+.fin-auth-switch .fin-link {
+  align-self: auto;
+}

@@ -150,7 +150,7 @@ export default function ContaSection({ onLogout }: { onLogout: () => void }) {
       </form>
 
       <button type="button" className="fin-btn fin-btn--ghost-danger fin-btn--block fin-account-logout" onClick={onLogout}>
-        Sair do painel
+        Sair da conta
       </button>
     </section>
   );

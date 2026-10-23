@@ -165,7 +165,7 @@ npm run migrar
 npm run criar-usuario
 ```
 
-O script pede o usuário e a senha (a senha não aparece na tela) e grava só o hash no banco. Sem `.env`, ele imprime um comando SQL para colar no **SQL Editor** do Neon. Rodar de novo troca a senha e desconecta as sessões abertas. Não existe tela de cadastro.
+O script pede nome, e-mail e senha (a senha não aparece na tela) e grava só o hash no banco, como conta **administradora**. Sem `.env`, ele imprime um comando SQL para colar no **SQL Editor** do Neon. Rodar de novo com o mesmo e-mail troca a senha e desconecta as sessões abertas. Contas comuns são criadas pela própria tela de login (**Criar conta**).
 
 ### 3. Netlify
 
@@ -181,4 +181,32 @@ O script pede o usuário e a senha (a senha não aparece na tela) e grava só o 
 npm test
 ```
 
-Roda 32 testes da API contra um Postgres em memória (PGlite), com a mesma migração do Neon: login, envio duplicado, mesmo número em dias diferentes, pagamento com cliques repetidos, desfazer pagamento, despesas e saldo, agrupamento por dia e mês no fuso de São Paulo.
+Roda os testes da API (53 hoje) contra um Postgres em memória (PGlite), com a mesma migração do Neon: login, envio duplicado, mesmo número em dias diferentes, pagamento com cliques repetidos, desfazer pagamento, despesas e saldo, agrupamento por dia e mês no fuso de São Paulo.
+
+## Contas, login em todo o app e dados no banco (migração 002)
+
+- **Todo o app exige login**: discador, Recentes e Financeiro. Sem sessão, aparece só a tela de login. Toda rota `/api/*` (menos `/api/me`, `/api/login`, `/api/signup`, `/api/logout` e `/api/health`) responde 401 sem sessão válida.
+- **Criar conta** na tela de login: nome, e-mail e senha (mínimo 8, com confirmação). E-mail repetido é recusado. Conta criada pela tela é sempre usuário comum (`role = user`), nunca administradora. Limite de 5 cadastros por IP por hora.
+- **Cada conta só vê os próprios dados**: toda consulta do servidor filtra pelo usuário da sessão (o id da conta nunca vem do navegador). Trocar o id de uma cobrança, despesa, mensagem ou recente na requisição de outra conta resulta em 404/400/409, sem vazar nem alterar nada.
+- **Mensagens prontas e Recentes ficam no banco** (`quick_messages`, `recent_entries`), por conta. O celular guarda uma cópia local por conta para o discador continuar instantâneo e funcionar sem internet; as alterações entram numa fila e vão para o banco assim que houver conexão. Ao entrar, a cópia local é atualizada com o banco (que é a fonte oficial). Em outro aparelho, as mesmas mensagens e Recentes aparecem.
+- **Conta nova começa com a lista de mensagens vazia.**
+- **Dados antigos do celular** (mensagens, Recentes e envios ainda não enviados, de antes desta versão) passam, uma única vez, para a primeira conta que entrar naquele aparelho. Nada é duplicado (cada item mantém o próprio id).
+- **"Limpar tudo" / excluir nos Recentes** apaga também os Recentes do banco, mas **não** mexe no financeiro (envios e cobranças continuam).
+
+### Tabelas novas
+
+- `users` (nome, e-mail único, hash da senha, papel `admin`/`user`)
+- `user_settings` (valor padrão e fuso, por conta)
+- `quick_messages`, `recent_entries` (por conta)
+- `charges`, `message_sends`, `expenses`, `sessions` ganharam `user_id` (obrigatório)
+
+A migração `002_multiusuario.sql` transforma o usuário único antigo (`app_user`) na conta administradora, com o mesmo e-mail e a mesma senha, e passa para ela todas as cobranças, envios, despesas, sessões abertas e o valor padrão. Nada é apagado: `app_user` e `settings` ficam no banco, sem uso. Ela pode ser rodada mais de uma vez sem efeito colateral.
+
+```bash
+npm run migrar   # aplica a 002 (precisa da DATABASE_URL no .env)
+```
+
+### Limitações conhecidas
+
+- Sem internet, o discador só abre se aquele aparelho já tinha entrado na conta antes (e o app já estiver carregado no navegador). O financeiro precisa de internet.
+- O app não sabe se a mensagem foi entregue no WhatsApp; só que a conversa foi aberta.

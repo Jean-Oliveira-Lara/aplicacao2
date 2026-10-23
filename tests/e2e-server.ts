@@ -22,10 +22,12 @@ const TYPES: Record<string, string> = {
 };
 
 const db = await createTestDb();
-await db.query('INSERT INTO app_user (id, username, password_hash) VALUES (1, $1, $2)', [
-  'jean',
-  await hashPassword('senha-teste-e2e'),
-]);
+// Conta administradora (como a conta que já existia em produção).
+const [admin] = await db.query<{ id: string }>(
+  `INSERT INTO users (name, email, password_hash, role) VALUES ('Jean', 'jean', $1, 'admin') RETURNING id`,
+  [await hashPassword('senha-teste-e2e')]
+);
+await db.query('INSERT INTO user_settings (user_id) VALUES ($1::uuid)', [admin.id]);
 
 createServer(async (req, res) => {
   const url = new URL(req.url ?? '/', `http://localhost:${port}`);
@@ -47,6 +49,7 @@ createServer(async (req, res) => {
   if (url.pathname === '/__test/sql') {
     // utilitário só do teste: consulta direta ao banco em memória
     const rows = await db.query(url.searchParams.get('q') ?? 'select 1');
+    // (só existe no servidor de testes local)
     res.writeHead(200, { 'content-type': 'application/json' });
     res.end(JSON.stringify(rows));
     return;
